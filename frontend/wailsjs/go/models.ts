@@ -122,6 +122,105 @@ export namespace main {
 	        this.relativePath = source["relativePath"];
 	    }
 	}
+	export class WorkspaceEntry {
+	    name: string;
+	    path: string;
+	    isDir: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new WorkspaceEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.path = source["path"];
+	        this.isDir = source["isDir"];
+	    }
+	}
+	export class WorkspaceSearchHit {
+	    path: string;
+	    line: number;
+	    column: number;
+	    preview: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new WorkspaceSearchHit(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.line = source["line"];
+	        this.column = source["column"];
+	        this.preview = source["preview"];
+	    }
+	}
+	export class WorkspaceReplaceResult {
+	    filesChanged: number;
+	    occurrences: number;
+	    paths: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new WorkspaceReplaceResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.filesChanged = source["filesChanged"];
+	        this.occurrences = source["occurrences"];
+	        this.paths = source["paths"];
+	    }
+	}
+	export class WorkspaceReplacePreviewItem {
+	    path: string;
+	    occurrences: number;
+	    sample: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new WorkspaceReplacePreviewItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.occurrences = source["occurrences"];
+	        this.sample = source["sample"];
+	    }
+	}
+	export class WorkspaceReplacePreviewResult {
+	    files: number;
+	    occurrences: number;
+	    items: WorkspaceReplacePreviewItem[];
+	
+	    static createFrom(source: any = {}) {
+	        return new WorkspaceReplacePreviewResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.files = source["files"];
+	        this.occurrences = source["occurrences"];
+	        this.items = this.convertValues(source["items"], WorkspaceReplacePreviewItem);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if(!a) {
+		        return a;
+		    }
+		    if (a.slice && !asMap) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 
 }
-

@@ -10,6 +10,18 @@ export function ClearRecentFiles() {
   return window['go']['main']['App']['ClearRecentFiles']();
 }
 
+export function CreateWorkspaceFile(arg1, arg2, arg3) {
+  return window['go']['main']['App']['CreateWorkspaceFile'](arg1, arg2, arg3);
+}
+
+export function CreateWorkspaceFolder(arg1, arg2, arg3) {
+  return window['go']['main']['App']['CreateWorkspaceFolder'](arg1, arg2, arg3);
+}
+
+export function DeleteWorkspaceEntry(arg1, arg2) {
+  return window['go']['main']['App']['DeleteWorkspaceEntry'](arg1, arg2);
+}
+
 export function ExportMarkdownAsPDF(arg1) {
   return window['go']['main']['App']['ExportMarkdownAsPDF'](arg1);
 }
@@ -38,8 +50,40 @@ export function RemoveRecentFile(arg1) {
   return window['go']['main']['App']['RemoveRecentFile'](arg1);
 }
 
+export function MoveWorkspaceEntry(arg1, arg2, arg3) {
+  return window['go']['main']['App']['MoveWorkspaceEntry'](arg1, arg2, arg3);
+}
+
+export function SearchWorkspaceContent(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SearchWorkspaceContent'](arg1, arg2, arg3);
+}
+
+export function ReplaceWorkspaceContent(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['ReplaceWorkspaceContent'](arg1, arg2, arg3, arg4, arg5);
+}
+
+export function PreviewWorkspaceReplace(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['PreviewWorkspaceReplace'](arg1, arg2, arg3, arg4);
+}
+
+export function ReplaceWorkspaceContentByPaths(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['ReplaceWorkspaceContentByPaths'](arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
+export function RenameWorkspaceEntry(arg1, arg2, arg3) {
+  return window['go']['main']['App']['RenameWorkspaceEntry'](arg1, arg2, arg3);
+}
+
+export function SelectWorkspaceFolder() {
+  return window['go']['main']['App']['SelectWorkspaceFolder']();
+}
+
 export function ResolveImageDataURL(arg1, arg2) {
   return window['go']['main']['App']['ResolveImageDataURL'](arg1, arg2);
+}
+
+export function ListWorkspaceEntries(arg1, arg2) {
+  return window['go']['main']['App']['ListWorkspaceEntries'](arg1, arg2);
 }
 
 export function SaveImageAsset(arg1) {

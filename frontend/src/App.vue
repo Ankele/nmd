@@ -13,15 +13,25 @@ import { oneDark } from "@codemirror/theme-one-dark";
 import {
   AddRecentFile,
   ClearRecentFiles,
+  CreateWorkspaceFile,
+  CreateWorkspaceFolder,
+  DeleteWorkspaceEntry,
   ExportMarkdownAsPDF,
+  ListWorkspaceEntries,
   ListRecentFiles,
   LoadImageDataURL,
+  MoveWorkspaceEntry,
   OpenMarkdownFile,
   OpenMarkdownFileAtPath,
+  PreviewWorkspaceReplace,
+  ReplaceWorkspaceContentByPaths,
   RemoveRecentFile,
+  RenameWorkspaceEntry,
   ResolveImageDataURL,
+  SearchWorkspaceContent,
   SaveImageAsset,
   SetDirtyState,
+  SelectWorkspaceFolder,
   SaveMarkdownFile,
 } from "../wailsjs/go/main/App";
 import {
@@ -63,6 +73,9 @@ const UI_LANG_KEY = "nmd.ui.lang";
 const UI_SHORTCUT_REDO_Y_KEY = "nmd.ui.shortcut.redoY";
 const UI_SHORTCUT_ZEN_KEY = "nmd.ui.shortcut.zen";
 const UI_SHORTCUT_BINDINGS_KEY = "nmd.ui.shortcut.bindings";
+const UI_TABS_SESSION_KEY = "nmd.ui.tabs.session";
+const UI_ACTIVE_TAB_KEY = "nmd.ui.tabs.active";
+const UI_WORKSPACE_ROOT_KEY = "nmd.ui.workspace.root";
 const DEFAULT_SPLIT_RATIO = 50;
 const DEFAULT_SIDEBAR_WIDTH = 240;
 const AUTOSAVE_INTERVAL_OPTIONS = [1200, 2500, 5000] as const;
@@ -120,8 +133,31 @@ type DocTab = {
   id: string;
   content: string;
   name: string;
+  customTitle: string;
+  pinned: boolean;
   path: string;
   dirty: boolean;
+};
+
+type WorkspaceNode = {
+  name: string;
+  relPath: string;
+  absPath: string;
+  isDir: boolean;
+  depth: number;
+};
+
+type WorkspaceSearchHit = {
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+};
+
+type WorkspaceReplacePreviewItem = {
+  path: string;
+  occurrences: number;
+  sample: string;
 };
 
 type ExportedSettings = {
@@ -190,6 +226,8 @@ type Command =
   | "fmtH2"
   | "fmtQuote"
   | "fmtBullet"
+  | "workspaceSearch"
+  | "switchTab"
   | "palette";
 
 const escapeHtml = (unsafe: string): string =>
@@ -322,6 +360,45 @@ const I18N: Record<UILanguage, Record<string, string>> = {
     settingsExport: "导出设置",
     settingsImportOk: "设置已导入",
     settingsImportFail: "设置导入失败",
+    tabMenuClose: "关闭",
+    tabMenuRename: "重命名标签",
+    tabMenuPin: "固定标签",
+    tabMenuUnpin: "取消固定",
+    tabMenuCloseUnpinned: "关闭未固定",
+    tabMenuCloseOthers: "关闭其他",
+    tabMenuCloseRight: "关闭右侧",
+    workspace: "工作区",
+    chooseFolder: "选择目录",
+    clearFolder: "清空目录",
+    filterWorkspace: "筛选文件...",
+    workspaceSearch: "内容搜索",
+    workspaceSearchPlaceholder: "搜索工作区内容...",
+    workspaceSearchRun: "搜索",
+    workspaceSearching: "搜索中...",
+    workspaceSearchEmpty: "无匹配内容",
+    workspaceSearchLine: "第 {line} 行",
+    workspaceReplaceWith: "替换为",
+    workspaceReplaceMatchCase: "区分大小写",
+    workspaceReplaceRun: "全部替换",
+    workspaceReplaceConfirm: "确认在工作区替换？\n关键词: {query}\n替换为: {replacement}",
+    workspaceReplacePreview: "预览替换",
+    workspaceReplaceSelectAll: "全选",
+    workspaceReplaceUnselectAll: "取消全选",
+    workspaceReplaceSelected: "替换已选 ({count})",
+    workspaceReplaceNoPreview: "暂无预览结果",
+    workspaceReplaceDiff: "Diff",
+    workspaceReplaceBefore: "替换前",
+    workspaceReplaceAfter: "替换后",
+    workspaceReplaceAfterEmpty: "(空)",
+    noWorkspace: "未选择工作区目录",
+    noWorkspaceMatch: "无匹配文件",
+    workspaceNewFile: "新建文件",
+    workspaceNewFolder: "新建文件夹",
+    workspaceRename: "重命名",
+    workspaceDelete: "删除",
+    tabSwitcher: "标签切换",
+    searchTabs: "搜索标签...",
+    noMatchedTabs: "无匹配标签",
     typeCommand: "输入命令...",
     noCommandFound: "未找到命令",
     keyboardShortcuts: "快捷键",
@@ -471,6 +548,45 @@ const I18N: Record<UILanguage, Record<string, string>> = {
     settingsExport: "Export Settings",
     settingsImportOk: "Settings imported",
     settingsImportFail: "Settings import failed",
+    tabMenuClose: "Close",
+    tabMenuRename: "Rename Tab",
+    tabMenuPin: "Pin Tab",
+    tabMenuUnpin: "Unpin Tab",
+    tabMenuCloseUnpinned: "Close Unpinned",
+    tabMenuCloseOthers: "Close Others",
+    tabMenuCloseRight: "Close Right",
+    workspace: "Workspace",
+    chooseFolder: "Choose Folder",
+    clearFolder: "Clear Folder",
+    filterWorkspace: "Filter files...",
+    workspaceSearch: "Content Search",
+    workspaceSearchPlaceholder: "Search workspace content...",
+    workspaceSearchRun: "Search",
+    workspaceSearching: "Searching...",
+    workspaceSearchEmpty: "No matched content",
+    workspaceSearchLine: "Ln {line}",
+    workspaceReplaceWith: "Replace with",
+    workspaceReplaceMatchCase: "Match case",
+    workspaceReplaceRun: "Replace All",
+    workspaceReplaceConfirm: "Confirm replace in workspace?\nQuery: {query}\nReplace: {replacement}",
+    workspaceReplacePreview: "Preview Replace",
+    workspaceReplaceSelectAll: "Select All",
+    workspaceReplaceUnselectAll: "Unselect All",
+    workspaceReplaceSelected: "Replace Selected ({count})",
+    workspaceReplaceNoPreview: "No preview results",
+    workspaceReplaceDiff: "Diff",
+    workspaceReplaceBefore: "Before",
+    workspaceReplaceAfter: "After",
+    workspaceReplaceAfterEmpty: "(empty)",
+    noWorkspace: "No workspace folder selected",
+    noWorkspaceMatch: "No matched files",
+    workspaceNewFile: "New File",
+    workspaceNewFolder: "New Folder",
+    workspaceRename: "Rename",
+    workspaceDelete: "Delete",
+    tabSwitcher: "Tab Switcher",
+    searchTabs: "Search tabs...",
+    noMatchedTabs: "No matched tabs",
     typeCommand: "Type a command...",
     noCommandFound: "No command found",
     keyboardShortcuts: "Keyboard Shortcuts",
@@ -570,6 +686,8 @@ const docTabs = ref<DocTab[]>([
     id: `tab-${Date.now().toString(36)}`,
     content: initialMarkdown,
     name: "untitled.md",
+    customTitle: "",
+    pinned: false,
     path: "",
     dirty: false,
   },
@@ -577,6 +695,7 @@ const docTabs = ref<DocTab[]>([
 const activeTabId = ref(docTabs.value[0].id);
 const statusText = ref("Ready");
 const showCommandPalette = ref(false);
+const showTabSwitcher = ref(false);
 const showHelpPanel = ref(false);
 const showSettingsPanel = ref(false);
 const showUsagePanel = ref(false);
@@ -605,13 +724,45 @@ const recentFiles = ref<RecentFile[]>([]);
 const pinnedRecentPaths = ref<string[]>([]);
 const outlineQuery = ref("");
 const recentQuery = ref("");
+const workspaceQuery = ref("");
+const workspaceSearchQuery = ref("");
+const workspaceSearchResults = ref<WorkspaceSearchHit[]>([]);
+const workspaceSearchLoading = ref(false);
+const workspaceSearchActiveIndex = ref(0);
+const workspaceReplaceWith = ref("");
+const workspaceReplaceMatchCase = ref(false);
+const workspaceReplaceRunning = ref(false);
+const workspaceReplacePreviewLoading = ref(false);
+const workspaceReplacePreviewItems = ref<WorkspaceReplacePreviewItem[]>([]);
+const workspaceReplaceSelectedPaths = ref<string[]>([]);
+const workspaceReplaceExpandedMap = ref<Record<string, boolean>>({});
+const workspaceRoot = ref("");
+const workspaceChildrenMap = ref<Record<string, Array<{ name: string; path: string; isDir: boolean }>>>({});
+const workspaceExpandedMap = ref<Record<string, boolean>>({});
+const workspaceContextMenu = ref<{
+  visible: boolean;
+  x: number;
+  y: number;
+  relPath: string;
+  isDir: boolean;
+}>({
+  visible: false,
+  x: 0,
+  y: 0,
+  relPath: "",
+  isDir: true,
+});
+const workspaceDraggingRelPath = ref("");
 const draggingRecentPath = ref("");
 const cursorLine = ref(1);
 const cursorCol = ref(1);
 const cursorPos = ref(0);
 const paletteQuery = ref("");
 const paletteActiveIndex = ref(0);
+const tabSwitcherQuery = ref("");
+const tabSwitcherActiveIndex = ref(0);
 const helpActiveIndex = ref(0);
+const tabHistory = ref<string[]>([]);
 const imagePreviewMap = ref<Record<string, string>>({});
 const imageStatus = ref("Image: idle");
 const autosaveState = ref<"idle" | "pending" | "saving" | "saved" | "error">("idle");
@@ -636,6 +787,15 @@ const sidebarWidth = ref(DEFAULT_SIDEBAR_WIDTH);
 const windowWidth = ref(1280);
 const collapsedOutlineMap = ref<Record<string, boolean>>({});
 const helpCollapsedGroups = ref<Record<string, boolean>>({});
+const tabDraggingId = ref("");
+const tabContextMenu = ref<{ visible: boolean; x: number; y: number; tabId: string }>({
+  visible: false,
+  x: 0,
+  y: 0,
+  tabId: "",
+});
+const tabRenamingId = ref("");
+const tabRenameDraft = ref("");
 const previewActiveLine = ref(-1);
 
 const editorRoot = ref<HTMLDivElement | null>(null);
@@ -646,6 +806,7 @@ const settingsImportInput = ref<HTMLInputElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
 const docZoneRef = ref<HTMLDivElement | null>(null);
 const workspaceRef = ref<HTMLDivElement | null>(null);
+const workspaceSearchInput = ref<HTMLInputElement | null>(null);
 
 const t = (key: string): string => I18N[uiLanguage.value][key] ?? key;
 const tf = (key: string, vars: Record<string, string | number>): string => {
@@ -675,6 +836,22 @@ const onBeforeUnload = (event: BeforeUnloadEvent): void => {
 };
 
 const getTabIndexById = (id: string): number => docTabs.value.findIndex((tab) => tab.id === id);
+const getTabDisplayName = (tab: DocTab): string => {
+  const title = String(tab.customTitle || "").trim();
+  return title || tab.name;
+};
+const normalizePathKey = (path: string): string => path.replace(/\\/g, "/").trim().toLowerCase();
+const getTabIndexByPath = (path: string): number => {
+  const key = normalizePathKey(path);
+  if (!key) return -1;
+  return docTabs.value.findIndex((tab) => normalizePathKey(tab.path) === key);
+};
+const activateTabByPath = (path: string): boolean => {
+  const idx = getTabIndexByPath(path);
+  if (idx < 0) return false;
+  activateTab(docTabs.value[idx].id);
+  return true;
+};
 
 const syncActiveTabFromState = (): void => {
   const idx = getTabIndexById(activeTabId.value);
@@ -699,18 +876,63 @@ const activateTab = (id: string): void => {
   updateStatus(`Switched: ${tab.name}`);
 };
 
+const switchRecentTab = (reverse = false): void => {
+  const history = tabHistory.value.filter((id) => getTabIndexById(id) >= 0);
+  if (history.length <= 1) return;
+  const targetId = reverse ? history[history.length - 1] : history[1];
+  if (!targetId) return;
+  activateTab(targetId);
+};
+
 const openInNewTab = (nextContent: string, nextName: string, nextPath: string, nextDirty = false): void => {
   syncActiveTabFromState();
   const tab: DocTab = {
     id: `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     content: nextContent,
     name: nextName,
+    customTitle: "",
+    pinned: false,
     path: nextPath,
     dirty: nextDirty,
   };
   docTabs.value = [...docTabs.value, tab];
   activeTabId.value = tab.id;
   setDocument(tab.content, tab.name, tab.path, tab.dirty);
+};
+
+const openOrActivateTab = (nextContent: string, nextName: string, nextPath: string, nextDirty = false): void => {
+  if (nextPath) {
+    const existingIdx = getTabIndexByPath(nextPath);
+    if (existingIdx >= 0) {
+      syncActiveTabFromState();
+      const existing = docTabs.value[existingIdx];
+      const hasContentDiff = existing.content !== nextContent;
+      if (hasContentDiff) {
+        if (existing.dirty) {
+          const ok = window.confirm(`"${existing.name}" has unsaved edits. Reload from disk and discard tab edits?`);
+          if (!ok) {
+            activateTab(existing.id);
+            updateStatus(`Kept unsaved tab: ${existing.name}`);
+            return;
+          }
+        }
+        docTabs.value[existingIdx] = {
+          ...existing,
+          content: nextContent,
+          name: nextName,
+          path: nextPath,
+          dirty: nextDirty,
+        };
+        activateTab(existing.id);
+        updateStatus(`Reloaded from disk: ${nextName}`);
+        return;
+      }
+      activateTab(existing.id);
+      updateStatus(`Already open: ${nextName}`);
+      return;
+    }
+  }
+  openInNewTab(nextContent, nextName, nextPath, nextDirty);
 };
 
 const closeTabNow = (id: string): void => {
@@ -731,6 +953,7 @@ const closeTabNow = (id: string): void => {
     setDocument(nextTab.content, nextTab.name, nextTab.path, nextTab.dirty);
   }
   updateStatus("Tab closed");
+  tabHistory.value = tabHistory.value.filter((tabId) => tabId !== id);
 };
 
 const requestCloseTab = (id: string): void => {
@@ -745,6 +968,154 @@ const requestCloseTab = (id: string): void => {
   }
   if (tab.dirty && !window.confirm(`Close unsaved tab "${tab.name}"?`)) return;
   closeTabNow(id);
+};
+
+const startRenameTab = (id: string): void => {
+  const idx = getTabIndexById(id);
+  if (idx < 0) return;
+  const tab = docTabs.value[idx];
+  tabRenamingId.value = id;
+  tabRenameDraft.value = getTabDisplayName(tab);
+  nextTick(() => {
+    const input = document.querySelector<HTMLInputElement>(`input[data-tab-rename-id="${id}"]`);
+    input?.focus();
+    input?.select();
+  });
+};
+
+const cancelRenameTab = (): void => {
+  tabRenamingId.value = "";
+  tabRenameDraft.value = "";
+};
+
+const commitRenameTab = (id: string): void => {
+  const idx = getTabIndexById(id);
+  if (idx < 0) return cancelRenameTab();
+  const tab = docTabs.value[idx];
+  const value = tabRenameDraft.value.trim();
+  docTabs.value[idx] = {
+    ...tab,
+    customTitle: value,
+  };
+  cancelRenameTab();
+  updateStatus(value ? `Tab renamed: ${value}` : `Tab label reset: ${tab.name}`);
+};
+
+const togglePinTab = (id: string): void => {
+  const idx = getTabIndexById(id);
+  if (idx < 0) return;
+  const tab = docTabs.value[idx];
+  const nextPinned = !tab.pinned;
+  docTabs.value[idx] = {
+    ...tab,
+    pinned: nextPinned,
+  };
+  updateStatus(nextPinned ? `Pinned tab: ${getTabDisplayName(tab)}` : `Unpinned tab: ${getTabDisplayName(tab)}`);
+};
+
+const closeTabContextMenu = (): void => {
+  tabContextMenu.value = { visible: false, x: 0, y: 0, tabId: "" };
+};
+
+const confirmCloseTabDirty = (tab: DocTab): boolean => {
+  if (!tab.dirty) return true;
+  return window.confirm(`Close unsaved tab "${tab.name}"?`);
+};
+
+const closeTabsByIds = (ids: string[]): void => {
+  if (ids.length === 0) return;
+  syncActiveTabFromState();
+  const remove = new Set(ids);
+  const original = [...docTabs.value];
+  const nextTabs: DocTab[] = [];
+  let removedActive = false;
+  original.forEach((tab) => {
+    if (!remove.has(tab.id)) {
+      nextTabs.push(tab);
+      return;
+    }
+    if (!confirmCloseTabDirty(tab)) {
+      nextTabs.push(tab);
+      return;
+    }
+    if (tab.id === activeTabId.value) removedActive = true;
+  });
+
+  if (nextTabs.length === 0) {
+    setDocument("# New Document\n\n", "untitled.md", "", false);
+    syncActiveTabFromState();
+    updateStatus("Tab reset");
+    return;
+  }
+
+  docTabs.value = nextTabs;
+  if (removedActive) {
+    const oldIdx = original.findIndex((tab) => tab.id === activeTabId.value);
+    const candidate = original.slice(oldIdx).find((tab) => nextTabs.some((it) => it.id === tab.id));
+    const fallback = candidate || nextTabs[nextTabs.length - 1];
+    activeTabId.value = fallback.id;
+    setDocument(fallback.content, fallback.name, fallback.path, fallback.dirty);
+  }
+};
+
+const closeOtherTabs = (id: string): void => {
+  const ids = docTabs.value.filter((tab) => tab.id !== id).map((tab) => tab.id);
+  closeTabsByIds(ids);
+};
+
+const closeTabsToRight = (id: string): void => {
+  const idx = getTabIndexById(id);
+  if (idx < 0) return;
+  const ids = docTabs.value.slice(idx + 1).map((tab) => tab.id);
+  closeTabsByIds(ids);
+};
+
+const closeUnpinnedTabs = (): void => {
+  const ids = docTabs.value.filter((tab) => !tab.pinned).map((tab) => tab.id);
+  closeTabsByIds(ids);
+};
+
+const onTabDragStart = (event: DragEvent, id: string): void => {
+  tabDraggingId.value = id;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", id);
+  }
+};
+
+const onTabDragOver = (event: DragEvent): void => {
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+};
+
+const onTabDrop = (event: DragEvent, targetId: string): void => {
+  event.preventDefault();
+  const fromId = tabDraggingId.value || event.dataTransfer?.getData("text/plain") || "";
+  tabDraggingId.value = "";
+  if (!fromId || fromId === targetId) return;
+  const fromIdx = getTabIndexById(fromId);
+  const toIdx = getTabIndexById(targetId);
+  if (fromIdx < 0 || toIdx < 0) return;
+  const next = [...docTabs.value];
+  const [moved] = next.splice(fromIdx, 1);
+  next.splice(toIdx, 0, moved);
+  docTabs.value = next;
+};
+
+const onTabDragEnd = (): void => {
+  tabDraggingId.value = "";
+};
+
+const openTabContextMenu = (event: MouseEvent, tabId: string): void => {
+  event.preventDefault();
+  activateTab(tabId);
+  cancelRenameTab();
+  tabContextMenu.value = {
+    visible: true,
+    x: event.clientX,
+    y: event.clientY,
+    tabId,
+  };
 };
 
 const themeCompartment = new Compartment();
@@ -1257,6 +1628,7 @@ const helpShortcutGroups = computed<HelpShortcutGroup[]>(() => [
     items: [
       { id: "find", label: t("findNext"), shortcut: "Ctrl/Cmd+F" },
       { id: "replace", label: t("findReplace"), shortcut: "Ctrl/Cmd+H" },
+      { id: "workspaceSearch", label: t("workspaceSearch"), shortcut: "Ctrl/Cmd+Shift+F" },
       { id: "gotoLine", label: t("goToLine"), shortcut: "Ctrl/Cmd+L" },
       { id: "undo", label: "Undo", shortcut: "Ctrl/Cmd+Z" },
       { id: "redo", label: "Redo", shortcut: enableRedoWithY.value ? "Ctrl/Cmd+Y / Ctrl/Cmd+Shift+Z" : "Ctrl/Cmd+Shift+Z" },
@@ -1293,6 +1665,7 @@ const helpShortcutGroups = computed<HelpShortcutGroup[]>(() => [
     title: t("shortcutGroupTools"),
     items: [
       { id: "palette", label: t("commandPalette"), shortcut: shortcutBindings.value.commandPalette },
+      { id: "switchTab", label: t("tabSwitcher"), shortcut: "Ctrl/Cmd+P" },
       { id: "settings", label: t("settings"), shortcut: shortcutBindings.value.settings },
       { id: "help", label: t("shortcuts"), shortcut: shortcutBindings.value.help },
       { id: "toggleAutosave", label: t("autosave"), shortcut: "Ctrl/Cmd+Shift+A" },
@@ -1321,6 +1694,17 @@ const filteredHelpShortcutGroups = computed<HelpShortcutGroup[]>(() => {
     .filter((group) => group.items.length > 0);
 });
 
+const filteredTabSwitcherItems = computed<DocTab[]>(() => {
+  const q = tabSwitcherQuery.value.trim().toLowerCase();
+  const list = [...docTabs.value];
+  if (!q) return list;
+  return list.filter((tab) => {
+    const display = getTabDisplayName(tab).toLowerCase();
+    const path = tab.path.toLowerCase();
+    return display.includes(q) || path.includes(q);
+  });
+});
+
 const visibleHelpShortcutItems = computed<Array<{ groupId: string; item: HelpShortcutItem }>>(() => {
   const visible: Array<{ groupId: string; item: HelpShortcutItem }> = [];
   filteredHelpShortcutGroups.value.forEach((group) => {
@@ -1343,7 +1727,9 @@ const paletteCommands = computed<{ id: Command; label: string; shortcut: string 
   { id: "save", label: t("save"), shortcut: "Ctrl/Cmd+S" },
   { id: "saveAs", label: t("saveAs"), shortcut: "Ctrl/Cmd+Shift+S" },
   { id: "replace", label: t("findReplace"), shortcut: "Ctrl/Cmd+H" },
+  { id: "workspaceSearch", label: t("workspaceSearch"), shortcut: "Ctrl/Cmd+Shift+F" },
   { id: "gotoLine", label: t("goToLine"), shortcut: "Ctrl/Cmd+L" },
+  { id: "switchTab", label: t("tabSwitcher"), shortcut: "Ctrl/Cmd+P" },
   { id: "palette", label: t("commandPalette"), shortcut: shortcutBindings.value.commandPalette },
   { id: "find", label: t("findNext"), shortcut: "Ctrl/Cmd+F" },
   { id: "replaceAll", label: t("replaceAll"), shortcut: "-" },
@@ -1404,6 +1790,14 @@ const executePaletteAt = (index: number): void => {
   const safeIndex = Math.max(0, Math.min(index, list.length - 1));
   runCommand(list[safeIndex].id);
   showCommandPalette.value = false;
+};
+
+const executeTabSwitcherAt = (index: number): void => {
+  const list = filteredTabSwitcherItems.value;
+  if (list.length === 0) return;
+  const safeIndex = Math.max(0, Math.min(index, list.length - 1));
+  activateTab(list[safeIndex].id);
+  showTabSwitcher.value = false;
 };
 
 const outlineItems = computed<OutlineItem[]>(() => {
@@ -1467,6 +1861,42 @@ const filteredRecentFiles = computed(() => {
   return recentFiles.value.filter((item) => {
     return item.name.toLowerCase().includes(q) || item.path.toLowerCase().includes(q);
   });
+});
+
+const buildWorkspaceNodes = (parentRel: string, depth: number, output: WorkspaceNode[]): void => {
+  const children = workspaceChildrenMap.value[parentRel] || [];
+  children.forEach((child) => {
+    const node: WorkspaceNode = {
+      name: child.name,
+      relPath: child.path,
+      absPath: workspaceRoot.value ? `${workspaceRoot.value.replace(/[\\\/]+$/, "")}/${child.path}` : child.path,
+      isDir: child.isDir,
+      depth,
+    };
+    output.push(node);
+    if (child.isDir && workspaceExpandedMap.value[child.path]) {
+      buildWorkspaceNodes(child.path, depth + 1, output);
+    }
+  });
+};
+
+const workspaceNodes = computed<WorkspaceNode[]>(() => {
+  if (!workspaceRoot.value) return [];
+  const output: WorkspaceNode[] = [];
+  buildWorkspaceNodes("", 0, output);
+  return output;
+});
+
+const filteredWorkspaceNodes = computed<WorkspaceNode[]>(() => {
+  const q = workspaceQuery.value.trim().toLowerCase();
+  if (!q) return workspaceNodes.value;
+  return workspaceNodes.value.filter((node) => node.name.toLowerCase().includes(q) || node.relPath.toLowerCase().includes(q));
+});
+
+const allWorkspaceReplacePreviewSelected = computed(() => {
+  if (workspaceReplacePreviewItems.value.length === 0) return false;
+  const selected = new Set(workspaceReplaceSelectedPaths.value);
+  return workspaceReplacePreviewItems.value.every((item) => selected.has(item.path));
 });
 
 const outlineHasCollapsibleItems = computed(() => {
@@ -2163,6 +2593,537 @@ const onRecentDragEnd = (): void => {
   draggingRecentPath.value = "";
 };
 
+const loadWorkspaceChildren = async (parentRel: string): Promise<void> => {
+  if (!workspaceRoot.value || !isWailsRuntime()) return;
+  try {
+    const items = await ListWorkspaceEntries(workspaceRoot.value, parentRel);
+    workspaceChildrenMap.value = {
+      ...workspaceChildrenMap.value,
+      [parentRel]: (items || []).map((item) => ({
+        name: item.name,
+        path: item.path,
+        isDir: item.isDir,
+      })),
+    };
+  } catch (error) {
+    updateStatus(`Load workspace failed: ${String(error)}`);
+  }
+};
+
+const reloadWorkspaceTree = async (): Promise<void> => {
+  if (!workspaceRoot.value) return;
+  const expanded = Object.entries(workspaceExpandedMap.value)
+    .filter(([, v]) => v)
+    .map(([k]) => k)
+    .sort((a, b) => a.split("/").length - b.split("/").length);
+  workspaceChildrenMap.value = {};
+  await loadWorkspaceChildren("");
+  for (const rel of expanded) {
+    await loadWorkspaceChildren(rel);
+  }
+};
+
+const closeWorkspaceContextMenu = (): void => {
+  workspaceContextMenu.value = {
+    visible: false,
+    x: 0,
+    y: 0,
+    relPath: "",
+    isDir: true,
+  };
+};
+
+const openWorkspaceContextMenu = (event: MouseEvent, node?: WorkspaceNode): void => {
+  event.preventDefault();
+  workspaceContextMenu.value = {
+    visible: true,
+    x: event.clientX,
+    y: event.clientY,
+    relPath: node?.relPath || "",
+    isDir: node ? node.isDir : true,
+  };
+};
+
+const getWorkspaceTargetParentRel = (): string => {
+  const rel = workspaceContextMenu.value.relPath;
+  if (!rel) return "";
+  if (workspaceContextMenu.value.isDir) return rel;
+  const idx = rel.lastIndexOf("/");
+  return idx >= 0 ? rel.slice(0, idx) : "";
+};
+
+const createWorkspaceFileAction = async (): Promise<void> => {
+  if (!workspaceRoot.value || !isWailsRuntime()) return;
+  const name = window.prompt("New file name:", "untitled.md");
+  if (!name) return;
+  try {
+    await CreateWorkspaceFile(workspaceRoot.value, getWorkspaceTargetParentRel(), name.trim());
+    await reloadWorkspaceTree();
+    updateStatus(`Created file: ${name.trim()}`);
+  } catch (error) {
+    updateStatus(`Create file failed: ${String(error)}`);
+  }
+};
+
+const createWorkspaceFolderAction = async (): Promise<void> => {
+  if (!workspaceRoot.value || !isWailsRuntime()) return;
+  const name = window.prompt("New folder name:", "new-folder");
+  if (!name) return;
+  try {
+    await CreateWorkspaceFolder(workspaceRoot.value, getWorkspaceTargetParentRel(), name.trim());
+    await reloadWorkspaceTree();
+    updateStatus(`Created folder: ${name.trim()}`);
+  } catch (error) {
+    updateStatus(`Create folder failed: ${String(error)}`);
+  }
+};
+
+const renameWorkspaceEntryAction = async (): Promise<void> => {
+  if (!workspaceRoot.value || !isWailsRuntime()) return;
+  const relPath = workspaceContextMenu.value.relPath;
+  if (!relPath) return;
+  const oldName = relPath.split("/").pop() || relPath;
+  const nextName = window.prompt("Rename entry:", oldName);
+  if (!nextName) return;
+  try {
+    await RenameWorkspaceEntry(workspaceRoot.value, relPath, nextName.trim());
+    await reloadWorkspaceTree();
+    updateStatus(`Renamed: ${oldName} -> ${nextName.trim()}`);
+  } catch (error) {
+    updateStatus(`Rename failed: ${String(error)}`);
+  }
+};
+
+const deleteWorkspaceEntryAction = async (): Promise<void> => {
+  if (!workspaceRoot.value || !isWailsRuntime()) return;
+  const relPath = workspaceContextMenu.value.relPath;
+  if (!relPath) return;
+  const name = relPath.split("/").pop() || relPath;
+  if (!window.confirm(`Delete "${name}"?`)) return;
+  try {
+    await DeleteWorkspaceEntry(workspaceRoot.value, relPath);
+    await reloadWorkspaceTree();
+    updateStatus(`Deleted: ${name}`);
+  } catch (error) {
+    updateStatus(`Delete failed: ${String(error)}`);
+  }
+};
+
+const pickWorkspaceFolder = async (): Promise<void> => {
+  if (!isWailsRuntime()) {
+    updateStatus("Workspace picker requires desktop runtime");
+    return;
+  }
+  try {
+    const selected = await SelectWorkspaceFolder();
+    const next = (selected || "").trim();
+    if (!next) return;
+    workspaceRoot.value = next;
+    workspaceChildrenMap.value = {};
+    workspaceExpandedMap.value = {};
+    workspaceSearchResults.value = [];
+    workspaceSearchActiveIndex.value = -1;
+    workspaceReplacePreviewItems.value = [];
+    workspaceReplaceSelectedPaths.value = [];
+    workspaceReplaceExpandedMap.value = {};
+    await loadWorkspaceChildren("");
+    updateStatus(`Workspace: ${next}`);
+  } catch (error) {
+    updateStatus(`Workspace select failed: ${String(error)}`);
+  }
+};
+
+const clearWorkspaceFolder = (): void => {
+  workspaceRoot.value = "";
+  workspaceChildrenMap.value = {};
+  workspaceExpandedMap.value = {};
+  workspaceQuery.value = "";
+  workspaceSearchQuery.value = "";
+  workspaceSearchResults.value = [];
+  workspaceSearchLoading.value = false;
+  workspaceSearchActiveIndex.value = -1;
+  workspaceReplaceWith.value = "";
+  workspaceReplaceMatchCase.value = false;
+  workspaceReplaceRunning.value = false;
+  workspaceReplacePreviewLoading.value = false;
+  workspaceReplacePreviewItems.value = [];
+  workspaceReplaceSelectedPaths.value = [];
+  workspaceReplaceExpandedMap.value = {};
+  updateStatus("Workspace cleared");
+};
+
+const toggleWorkspaceDir = async (node: WorkspaceNode): Promise<void> => {
+  if (!node.isDir) return;
+  const expanded = Boolean(workspaceExpandedMap.value[node.relPath]);
+  workspaceExpandedMap.value = {
+    ...workspaceExpandedMap.value,
+    [node.relPath]: !expanded,
+  };
+  if (!expanded && !workspaceChildrenMap.value[node.relPath]) {
+    await loadWorkspaceChildren(node.relPath);
+  }
+};
+
+const openWorkspaceNode = async (node: WorkspaceNode): Promise<void> => {
+  if (node.isDir) {
+    await toggleWorkspaceDir(node);
+    return;
+  }
+  const lower = node.name.toLowerCase();
+  if (!(lower.endsWith(".md") || lower.endsWith(".markdown") || lower.endsWith(".txt"))) return;
+  const absPath = workspaceRoot.value
+    ? `${workspaceRoot.value.replace(/[\\\/]+$/, "")}/${node.relPath}`.replace(/\\/g, "/")
+    : node.relPath;
+  try {
+    const result = await OpenMarkdownFileAtPath(absPath);
+    if (!result) return;
+    openOrActivateTab(result.content, result.name, result.path, false);
+    await addRecentFile(result.path, result.name);
+    updateStatus(`Opened from workspace: ${result.name}`);
+  } catch (error) {
+    updateStatus(`Open workspace file failed: ${String(error)}`);
+  }
+};
+
+const runWorkspaceContentSearch = async (): Promise<void> => {
+  if (!workspaceRoot.value || !isWailsRuntime()) return;
+  const query = workspaceSearchQuery.value.trim();
+  if (!query) {
+    workspaceSearchResults.value = [];
+    workspaceSearchLoading.value = false;
+    return;
+  }
+  workspaceSearchLoading.value = true;
+  try {
+    const hits = await SearchWorkspaceContent(workspaceRoot.value, query, 120);
+    workspaceSearchResults.value = (hits || []).map((item) => ({
+      path: item.path,
+      line: item.line,
+      column: item.column,
+      preview: item.preview,
+    }));
+    updateStatus(`Workspace search: ${workspaceSearchResults.value.length} hit(s)`);
+    workspaceSearchActiveIndex.value = workspaceSearchResults.value.length > 0 ? 0 : -1;
+  } catch (error) {
+    workspaceSearchResults.value = [];
+    workspaceSearchActiveIndex.value = -1;
+    updateStatus(`Workspace search failed: ${String(error)}`);
+  } finally {
+    workspaceSearchLoading.value = false;
+  }
+};
+
+const moveWorkspaceSearchSelection = (delta: number): void => {
+  const len = workspaceSearchResults.value.length;
+  if (len === 0) {
+    workspaceSearchActiveIndex.value = -1;
+    return;
+  }
+  if (workspaceSearchActiveIndex.value < 0 || workspaceSearchActiveIndex.value >= len) {
+    workspaceSearchActiveIndex.value = 0;
+    return;
+  }
+  const next = (workspaceSearchActiveIndex.value + delta + len) % len;
+  workspaceSearchActiveIndex.value = next;
+};
+
+const openActiveWorkspaceSearchHit = async (): Promise<void> => {
+  const idx = workspaceSearchActiveIndex.value;
+  if (idx < 0 || idx >= workspaceSearchResults.value.length) return;
+  await openWorkspaceSearchHit(workspaceSearchResults.value[idx]);
+};
+
+const onWorkspaceSearchInputKeydown = (event: KeyboardEvent): void => {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    moveWorkspaceSearchSelection(1);
+    return;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    moveWorkspaceSearchSelection(-1);
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    if (workspaceSearchResults.value.length > 0 && workspaceSearchActiveIndex.value >= 0) {
+      void openActiveWorkspaceSearchHit();
+      return;
+    }
+    void runWorkspaceContentSearch();
+  }
+};
+
+const focusWorkspaceSearch = async (): Promise<void> => {
+  if (!showSidebar.value) {
+    showSidebar.value = true;
+  }
+  await nextTick();
+  workspaceSearchInput.value?.focus();
+  workspaceSearchInput.value?.select();
+};
+
+const getWorkspaceSearchPreviewHTML = (text: string): string => {
+  const safe = escapeHtml(text || "");
+  const query = workspaceSearchQuery.value.trim();
+  if (!query) return safe;
+  const reg = new RegExp(escapeRegExp(query), "ig");
+  return safe.replace(reg, (m) => `<mark>${m}</mark>`);
+};
+
+const getWorkspaceReplaceSampleHTML = (text: string): string => {
+  const safe = escapeHtml(text || "");
+  const query = workspaceSearchQuery.value.trim();
+  if (!query) return safe;
+  const reg = new RegExp(escapeRegExp(query), workspaceReplaceMatchCase.value ? "g" : "ig");
+  return safe.replace(reg, (m) => `<mark>${m}</mark>`);
+};
+
+const getWorkspaceReplaceSampleAfterText = (text: string): string => {
+  const query = workspaceSearchQuery.value.trim();
+  if (!query) return text || "";
+  const replacement = workspaceReplaceWith.value;
+  if (workspaceReplaceMatchCase.value) {
+    return (text || "").split(query).join(replacement);
+  }
+  try {
+    const reg = new RegExp(escapeRegExp(query), "ig");
+    return (text || "").replace(reg, replacement);
+  } catch {
+    return text || "";
+  }
+};
+
+const getWorkspaceReplaceSampleAfterHTML = (text: string): string => {
+  const after = getWorkspaceReplaceSampleAfterText(text);
+  if (!after) return `<span class="workspace-replace-empty">${escapeHtml(t("workspaceReplaceAfterEmpty"))}</span>`;
+  const safe = escapeHtml(after);
+  const replacement = workspaceReplaceWith.value;
+  if (!replacement) return safe;
+  const reg = new RegExp(escapeRegExp(replacement), "g");
+  return safe.replace(reg, (m) => `<mark class="replace-mark">${m}</mark>`);
+};
+
+const toggleWorkspaceReplaceDiff = (path: string): void => {
+  workspaceReplaceExpandedMap.value = {
+    ...workspaceReplaceExpandedMap.value,
+    [path]: !workspaceReplaceExpandedMap.value[path],
+  };
+};
+
+const openWorkspaceSearchHit = async (hit: WorkspaceSearchHit): Promise<void> => {
+  if (!workspaceRoot.value || !isWailsRuntime()) return;
+  const absPath = `${workspaceRoot.value.replace(/[\\\/]+$/, "")}/${hit.path}`.replace(/\\/g, "/");
+  try {
+    const result = await OpenMarkdownFileAtPath(absPath);
+    if (!result) return;
+    openOrActivateTab(result.content, result.name, result.path, false);
+    await addRecentFile(result.path, result.name);
+    await nextTick();
+    jumpToLineAndColumn(hit.line, hit.column);
+    updateStatus(`Opened search hit: ${hit.path}:${hit.line}:${hit.column}`);
+  } catch (error) {
+    updateStatus(`Open search hit failed: ${String(error)}`);
+  }
+};
+
+const refreshTabsAfterWorkspaceReplace = async (changedRelPaths: string[]): Promise<void> => {
+  if (!workspaceRoot.value || changedRelPaths.length === 0) return;
+  const root = workspaceRoot.value.replace(/[\\\/]+$/, "").replace(/\\/g, "/");
+  const changedAbs = new Set(changedRelPaths.map((rel) => `${root}/${rel}`.replace(/\\/g, "/").toLowerCase()));
+
+  let activeUpdated = false;
+  for (let i = 0; i < docTabs.value.length; i += 1) {
+    const tab = docTabs.value[i];
+    if (!tab.path || tab.dirty) continue;
+    const key = tab.path.replace(/\\/g, "/").toLowerCase();
+    if (!changedAbs.has(key)) continue;
+    try {
+      const latest = await OpenMarkdownFileAtPath(tab.path);
+      if (!latest) continue;
+      docTabs.value[i] = {
+        ...tab,
+        content: latest.content,
+        name: latest.name,
+        path: latest.path,
+        dirty: false,
+      };
+      if (tab.id === activeTabId.value) {
+        setDocument(latest.content, latest.name, latest.path, false);
+        activeUpdated = true;
+      }
+    } catch {
+      // ignore reload failure for single tab
+    }
+  }
+  if (!activeUpdated) {
+    syncActiveTabFromState();
+  }
+};
+
+const runWorkspaceReplacePreview = async (): Promise<void> => {
+  if (!workspaceRoot.value || !isWailsRuntime() || workspaceReplacePreviewLoading.value) return;
+  const query = workspaceSearchQuery.value.trim();
+  if (!query) {
+    workspaceReplacePreviewItems.value = [];
+    workspaceReplaceSelectedPaths.value = [];
+    updateStatus("Workspace replace preview requires search text");
+    return;
+  }
+  workspaceReplacePreviewLoading.value = true;
+  try {
+    const result = await PreviewWorkspaceReplace(workspaceRoot.value, query, workspaceReplaceMatchCase.value, 500);
+    const items = (result?.items || []).map((item) => ({
+      path: item.path,
+      occurrences: item.occurrences,
+      sample: item.sample,
+    }));
+    workspaceReplacePreviewItems.value = items;
+    workspaceReplaceSelectedPaths.value = items.map((item) => item.path);
+    workspaceReplaceExpandedMap.value = {};
+    updateStatus(`Workspace replace preview: ${result?.occurrences || 0} hit(s) in ${result?.files || 0} file(s)`);
+  } catch (error) {
+    workspaceReplacePreviewItems.value = [];
+    workspaceReplaceSelectedPaths.value = [];
+    workspaceReplaceExpandedMap.value = {};
+    updateStatus(`Workspace replace preview failed: ${String(error)}`);
+  } finally {
+    workspaceReplacePreviewLoading.value = false;
+  }
+};
+
+const toggleWorkspaceReplacePath = (path: string): void => {
+  const set = new Set(workspaceReplaceSelectedPaths.value);
+  if (set.has(path)) set.delete(path);
+  else set.add(path);
+  workspaceReplaceSelectedPaths.value = Array.from(set);
+};
+
+const toggleSelectAllWorkspaceReplacePaths = (): void => {
+  if (workspaceReplacePreviewItems.value.length === 0) return;
+  if (allWorkspaceReplacePreviewSelected.value) {
+    workspaceReplaceSelectedPaths.value = [];
+    return;
+  }
+  workspaceReplaceSelectedPaths.value = workspaceReplacePreviewItems.value.map((item) => item.path);
+};
+
+const runWorkspaceReplace = async (): Promise<void> => {
+  if (!workspaceRoot.value || !isWailsRuntime() || workspaceReplaceRunning.value) return;
+  const query = workspaceSearchQuery.value.trim();
+  if (!query) {
+    updateStatus("Workspace replace requires search text");
+    return;
+  }
+  const replacement = workspaceReplaceWith.value;
+  const selectedPaths = workspaceReplaceSelectedPaths.value.filter((p) => p.trim() !== "");
+  if (selectedPaths.length === 0) {
+    updateStatus("No selected preview files for replace");
+    return;
+  }
+  const confirmText = `${tf("workspaceReplaceConfirm", { query, replacement })}\nFiles: ${selectedPaths.length}`;
+  if (!window.confirm(confirmText)) return;
+
+  workspaceReplaceRunning.value = true;
+  try {
+    const result = await ReplaceWorkspaceContentByPaths(
+      workspaceRoot.value,
+      query,
+      replacement,
+      workspaceReplaceMatchCase.value,
+      selectedPaths,
+      500,
+    );
+    if (!result) {
+      updateStatus("Workspace replace cancelled");
+      return;
+    }
+    await refreshTabsAfterWorkspaceReplace(result.paths || []);
+    await runWorkspaceContentSearch();
+    await runWorkspaceReplacePreview();
+    updateStatus(`Workspace replaced: ${result.occurrences} hit(s) in ${result.filesChanged} file(s)`);
+  } catch (error) {
+    updateStatus(`Workspace replace failed: ${String(error)}`);
+  } finally {
+    workspaceReplaceRunning.value = false;
+  }
+};
+
+const updateTabPathAfterWorkspaceMove = (fromRel: string, toRel: string): void => {
+  if (!workspaceRoot.value) return;
+  const root = workspaceRoot.value.replace(/\\/g, "/").replace(/[\/]+$/, "");
+  const fromPrefix = `${root}/${fromRel}`;
+  const toPrefix = `${root}/${toRel}`;
+  const nextTabs = docTabs.value.map((tab) => {
+    const p = tab.path.replace(/\\/g, "/");
+    if (p === fromPrefix || p.startsWith(`${fromPrefix}/`)) {
+      return {
+        ...tab,
+        path: `${toPrefix}${p.slice(fromPrefix.length)}`,
+      };
+    }
+    return tab;
+  });
+  docTabs.value = nextTabs;
+  if (filePath.value) {
+    const p = filePath.value.replace(/\\/g, "/");
+    if (p === fromPrefix || p.startsWith(`${fromPrefix}/`)) {
+      filePath.value = `${toPrefix}${p.slice(fromPrefix.length)}`;
+    }
+  }
+};
+
+const moveWorkspaceEntryAction = async (fromRel: string, targetDirRel: string): Promise<void> => {
+  if (!workspaceRoot.value || !isWailsRuntime()) return;
+  const from = fromRel.trim();
+  if (!from) return;
+  const toDir = targetDirRel.trim();
+  if (from === toDir) return;
+  try {
+    const movedRel = await MoveWorkspaceEntry(workspaceRoot.value, from, toDir);
+    updateTabPathAfterWorkspaceMove(from, movedRel);
+    await reloadWorkspaceTree();
+    updateStatus(`Moved: ${from} -> ${movedRel}`);
+  } catch (error) {
+    updateStatus(`Move failed: ${String(error)}`);
+  }
+};
+
+const getWorkspaceNodeDropTargetDir = (node?: WorkspaceNode): string => {
+  if (!node) return "";
+  if (node.isDir) return node.relPath;
+  const idx = node.relPath.lastIndexOf("/");
+  return idx >= 0 ? node.relPath.slice(0, idx) : "";
+};
+
+const onWorkspaceDragStart = (event: DragEvent, node: WorkspaceNode): void => {
+  workspaceDraggingRelPath.value = node.relPath;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", node.relPath);
+  }
+};
+
+const onWorkspaceDragOver = (event: DragEvent): void => {
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = "move";
+  }
+};
+
+const onWorkspaceDrop = async (event: DragEvent, node?: WorkspaceNode): Promise<void> => {
+  event.preventDefault();
+  const fromRel = workspaceDraggingRelPath.value || event.dataTransfer?.getData("text/plain") || "";
+  workspaceDraggingRelPath.value = "";
+  if (!fromRel) return;
+  const toDir = getWorkspaceNodeDropTargetDir(node);
+  await moveWorkspaceEntryAction(fromRel, toDir);
+};
+
+const onWorkspaceDragEnd = (): void => {
+  workspaceDraggingRelPath.value = "";
+};
+
 const setDocument = (nextContent: string, nextName: string, nextPath: string, nextDirty = false): void => {
   if (editorView && editorView.state.doc.toString() !== nextContent) {
     editorView.dispatch({
@@ -2176,6 +3137,45 @@ const setDocument = (nextContent: string, nextName: string, nextPath: string, ne
   dirty.value = nextDirty;
   autosaveState.value = "idle";
   autosaveAt.value = "";
+};
+
+const restoreTabSession = (): boolean => {
+  try {
+    const savedTabs = JSON.parse(localStorage.getItem(UI_TABS_SESSION_KEY) || "[]") as unknown[];
+    if (!Array.isArray(savedTabs) || savedTabs.length === 0) return false;
+    const seen = new Set<string>();
+    const tabs: DocTab[] = [];
+    savedTabs.forEach((item, idx) => {
+      if (!item || typeof item !== "object") return;
+      const row = item as Record<string, unknown>;
+      const rawId = typeof row.id === "string" ? row.id.trim() : "";
+      const idBase = rawId || `tab-restored-${idx}`;
+      const id = seen.has(idBase) ? `${idBase}-${idx}` : idBase;
+      if (seen.has(id)) return;
+      seen.add(id);
+      tabs.push({
+        id,
+        content: typeof row.content === "string" ? row.content : "",
+        name: typeof row.name === "string" && row.name.trim() ? row.name : "untitled.md",
+        customTitle: typeof row.customTitle === "string" ? row.customTitle : "",
+        pinned: Boolean(row.pinned),
+        path: typeof row.path === "string" ? row.path : "",
+        dirty: Boolean(row.dirty),
+      });
+    });
+    if (tabs.length === 0) return false;
+    const savedActive = (localStorage.getItem(UI_ACTIVE_TAB_KEY) || "").trim();
+    const active = tabs.some((tab) => tab.id === savedActive) ? savedActive : tabs[0].id;
+    docTabs.value = tabs;
+    activeTabId.value = active;
+    tabHistory.value = [active, ...tabs.map((tab) => tab.id).filter((id) => id !== active)];
+    const current = tabs.find((tab) => tab.id === active) || tabs[0];
+    setDocument(current.content, current.name, current.path, current.dirty);
+    updateStatus(`Session restored: ${tabs.length} tab(s)`);
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 const restoreDraft = (): boolean => {
@@ -2239,6 +3239,11 @@ const restoreUIState = (): void => {
   const savedSidebar = localStorage.getItem(UI_SIDEBAR_KEY);
   if (savedSidebar === "1") showSidebar.value = true;
   if (savedSidebar === "0") showSidebar.value = false;
+
+  const savedWorkspaceRoot = (localStorage.getItem(UI_WORKSPACE_ROOT_KEY) || "").trim();
+  if (savedWorkspaceRoot) {
+    workspaceRoot.value = savedWorkspaceRoot;
+  }
 
   const savedZen = localStorage.getItem(UI_ZEN_KEY);
   if (savedZen === "1") isZenMode.value = true;
@@ -2519,6 +3524,20 @@ const jumpToLine = (lineZeroBased: number): void => {
   jumpToPosition(line.from);
 };
 
+const jumpToLineAndColumn = (lineOneBased: number, columnOneBased: number): void => {
+  if (!editorView) return;
+  const docLines = editorView.state.doc.lines;
+  const safeLine = Math.max(1, Math.min(docLines, lineOneBased));
+  const line = editorView.state.doc.line(safeLine);
+  const safeColumn = Math.max(1, Math.min(line.length + 1, columnOneBased));
+  const pos = line.from + safeColumn - 1;
+  editorView.dispatch({
+    selection: EditorSelection.cursor(pos),
+    effects: EditorView.scrollIntoView(pos, { y: "center" }),
+  });
+  editorView.focus();
+};
+
 const goToLine = (): void => {
   if (!editorView) return;
   const docLines = editorView.state.doc.lines;
@@ -2639,7 +3658,7 @@ const cancelDeleteAction = (): void => {
 };
 
 const createNewFile = (): void => {
-  openInNewTab("# New Document\n\n", "untitled.md", "", false);
+    openInNewTab("# New Document\n\n", "untitled.md", "", false);
   updateStatus("New file created");
 };
 
@@ -2653,7 +3672,7 @@ const handleFileSelected = async (event: Event): Promise<void> => {
   if (!file) return;
 
   const text = await file.text();
-  openInNewTab(text, file.name, "", false);
+    openInNewTab(text, file.name, "", false);
   updateStatus(`Opened ${file.name} (Browser fallback)`);
   target.value = "";
 };
@@ -2697,7 +3716,7 @@ const openFile = async (): Promise<void> => {
         updateStatus("Open cancelled");
         return;
       }
-      openInNewTab(result.content, result.name, result.path, false);
+      openOrActivateTab(result.content, result.name, result.path, false);
       void addRecentFile(result.path, result.name);
       updateStatus(`Opened ${result.name}`);
       return;
@@ -2723,7 +3742,7 @@ const openRecentFile = async (item: RecentFile): Promise<void> => {
       updateStatus(`Recent file not found and removed: ${item.name}`);
       return;
     }
-    openInNewTab(result.content, result.name, result.path, false);
+    openOrActivateTab(result.content, result.name, result.path, false);
     void addRecentFile(result.path, result.name);
     updateStatus(`Opened ${result.name}`);
   } catch {
@@ -2742,7 +3761,7 @@ const openDroppedPath = async (path: string): Promise<void> => {
       updateStatus("Dropped file not found");
       return;
     }
-    openInNewTab(result.content, result.name, result.path, false);
+    openOrActivateTab(result.content, result.name, result.path, false);
     void addRecentFile(result.path, result.name);
     updateStatus(`Opened ${result.name} (drop)`);
   } catch (error) {
@@ -3456,6 +4475,7 @@ const runCommand = (cmd: Command): void => {
   if (cmd === "find") return findNext();
   if (cmd === "gotoLine") return goToLine();
   if (cmd === "replace") return void openReplacePanel();
+  if (cmd === "workspaceSearch") return void focusWorkspaceSearch();
   if (cmd === "replaceAll") return replaceAll();
   if (cmd === "fmtBold") return applyWrap("**", "**");
   if (cmd === "fmtItalic") return applyWrap("*", "*");
@@ -3501,6 +4521,15 @@ const runCommand = (cmd: Command): void => {
     return;
   }
   if (cmd === "toggleTheme") return toggleTheme();
+  if (cmd === "switchTab") {
+    showCommandPalette.value = false;
+    showTabSwitcher.value = !showTabSwitcher.value;
+    if (showTabSwitcher.value) {
+      tabSwitcherQuery.value = "";
+      tabSwitcherActiveIndex.value = 0;
+    }
+    return;
+  }
   if (cmd === "palette") {
     showCommandPalette.value = !showCommandPalette.value;
     if (showCommandPalette.value) {
@@ -3534,6 +4563,28 @@ const onKeydown = (event: KeyboardEvent): void => {
       return;
     }
   }
+  if (showTabSwitcher.value) {
+    if (rawKey === "arrowdown") {
+      event.preventDefault();
+      if (filteredTabSwitcherItems.value.length > 0) {
+        tabSwitcherActiveIndex.value = (tabSwitcherActiveIndex.value + 1) % filteredTabSwitcherItems.value.length;
+      }
+      return;
+    }
+    if (rawKey === "arrowup") {
+      event.preventDefault();
+      if (filteredTabSwitcherItems.value.length > 0) {
+        const next = tabSwitcherActiveIndex.value - 1;
+        tabSwitcherActiveIndex.value = next < 0 ? filteredTabSwitcherItems.value.length - 1 : next;
+      }
+      return;
+    }
+    if (rawKey === "enter") {
+      event.preventDefault();
+      executeTabSwitcherAt(tabSwitcherActiveIndex.value);
+      return;
+    }
+  }
   if (showHelpPanel.value) {
     if (rawKey === "arrowdown") {
       event.preventDefault();
@@ -3560,6 +4611,26 @@ const onKeydown = (event: KeyboardEvent): void => {
     }
   }
   if (rawKey === "escape") {
+    if (workspaceContextMenu.value.visible) {
+      closeWorkspaceContextMenu();
+      event.preventDefault();
+      return;
+    }
+    if (showTabSwitcher.value) {
+      showTabSwitcher.value = false;
+      event.preventDefault();
+      return;
+    }
+    if (tabRenamingId.value) {
+      cancelRenameTab();
+      event.preventDefault();
+      return;
+    }
+    if (tabContextMenu.value.visible) {
+      closeTabContextMenu();
+      event.preventDefault();
+      return;
+    }
     if (isZenMode.value) {
       isZenMode.value = false;
       event.preventDefault();
@@ -3605,6 +4676,9 @@ const onKeydown = (event: KeyboardEvent): void => {
   if (target instanceof HTMLElement && target.classList.contains("settings-shortcut-input")) {
     return;
   }
+  if (target instanceof HTMLElement && target.classList.contains("tab-rename-input")) {
+    return;
+  }
 
   const isPrimary = event.metaKey || event.ctrlKey;
   if (!isPrimary) return;
@@ -3628,6 +4702,21 @@ const onKeydown = (event: KeyboardEvent): void => {
   if (key === "n") {
     event.preventDefault();
     createNewFile();
+    return;
+  }
+  if (key === "tab") {
+    event.preventDefault();
+    switchRecentTab(event.shiftKey);
+    return;
+  }
+  if (key === "p") {
+    event.preventDefault();
+    showCommandPalette.value = false;
+    showTabSwitcher.value = !showTabSwitcher.value;
+    if (showTabSwitcher.value) {
+      tabSwitcherQuery.value = "";
+      tabSwitcherActiveIndex.value = 0;
+    }
     return;
   }
   if (matchesShortcutBinding(event, "commandPalette")) {
@@ -3657,6 +4746,11 @@ const onKeydown = (event: KeyboardEvent): void => {
   if (key === "h") {
     event.preventDefault();
     void openReplacePanel();
+    return;
+  }
+  if (key === "f" && event.shiftKey) {
+    event.preventDefault();
+    void focusWorkspaceSearch();
     return;
   }
   if (key === "l") {
@@ -3825,6 +4919,31 @@ watch(paletteQuery, () => {
   paletteActiveIndex.value = 0;
 });
 
+watch(tabSwitcherQuery, () => {
+  tabSwitcherActiveIndex.value = 0;
+});
+
+watch(workspaceSearchQuery, (value) => {
+  workspaceReplacePreviewItems.value = [];
+  workspaceReplaceSelectedPaths.value = [];
+  workspaceReplacePreviewLoading.value = false;
+  workspaceReplaceExpandedMap.value = {};
+  if (value.trim()) return;
+  workspaceSearchResults.value = [];
+  workspaceSearchLoading.value = false;
+  workspaceSearchActiveIndex.value = -1;
+});
+
+watch(workspaceSearchResults, (items) => {
+  if (items.length === 0) {
+    workspaceSearchActiveIndex.value = -1;
+    return;
+  }
+  if (workspaceSearchActiveIndex.value < 0 || workspaceSearchActiveIndex.value >= items.length) {
+    workspaceSearchActiveIndex.value = 0;
+  }
+});
+
 watch(filteredPaletteCommands, (items) => {
   if (items.length === 0) {
     paletteActiveIndex.value = 0;
@@ -3832,6 +4951,16 @@ watch(filteredPaletteCommands, (items) => {
   }
   if (paletteActiveIndex.value > items.length - 1) {
     paletteActiveIndex.value = items.length - 1;
+  }
+});
+
+watch(filteredTabSwitcherItems, (items) => {
+  if (items.length === 0) {
+    tabSwitcherActiveIndex.value = 0;
+    return;
+  }
+  if (tabSwitcherActiveIndex.value > items.length - 1) {
+    tabSwitcherActiveIndex.value = items.length - 1;
   }
 });
 
@@ -3889,6 +5018,33 @@ watch(
 
 watch(showSidebar, (value) => {
   localStorage.setItem(UI_SIDEBAR_KEY, value ? "1" : "0");
+});
+
+watch(workspaceRoot, (value) => {
+  localStorage.setItem(UI_WORKSPACE_ROOT_KEY, value || "");
+  workspaceSearchResults.value = [];
+  workspaceSearchLoading.value = false;
+  workspaceSearchActiveIndex.value = -1;
+  workspaceReplacePreviewItems.value = [];
+  workspaceReplaceSelectedPaths.value = [];
+  workspaceReplacePreviewLoading.value = false;
+  workspaceReplaceExpandedMap.value = {};
+});
+
+watch(workspaceReplaceMatchCase, () => {
+  workspaceReplacePreviewItems.value = [];
+  workspaceReplaceSelectedPaths.value = [];
+  workspaceReplaceExpandedMap.value = {};
+});
+
+watch(workspaceReplacePreviewItems, (items) => {
+  const valid = new Set(items.map((item) => item.path));
+  workspaceReplaceSelectedPaths.value = workspaceReplaceSelectedPaths.value.filter((path) => valid.has(path));
+  const next: Record<string, boolean> = {};
+  Object.entries(workspaceReplaceExpandedMap.value).forEach(([path, expanded]) => {
+    if (expanded && valid.has(path)) next[path] = true;
+  });
+  workspaceReplaceExpandedMap.value = next;
 });
 
 watch(isZenMode, (value) => {
@@ -3966,6 +5122,27 @@ watch(filePath, (value) => {
   if (path) {
     localStorage.setItem(LAST_FILE_PATH_KEY, path);
   }
+});
+
+watch(
+  docTabs,
+  (tabs) => {
+    localStorage.setItem(UI_TABS_SESSION_KEY, JSON.stringify(tabs));
+    if (tabContextMenu.value.visible && !tabs.some((tab) => tab.id === tabContextMenu.value.tabId)) {
+      closeTabContextMenu();
+    }
+  },
+  { deep: true },
+);
+
+watch(activeTabId, (id, prevId) => {
+  localStorage.setItem(UI_ACTIVE_TAB_KEY, id);
+  const existing = new Set(docTabs.value.map((tab) => tab.id));
+  const rest = tabHistory.value.filter((item) => item !== id && existing.has(item));
+  if (prevId && prevId !== id && existing.has(prevId) && !rest.includes(prevId)) {
+    rest.unshift(prevId);
+  }
+  tabHistory.value = [id, ...rest];
 });
 
 watch(
@@ -4085,9 +5262,15 @@ onMounted(() => {
   editorScrollElement.addEventListener("dragover", handleEditorDragOver);
   editorScrollElement.addEventListener("drop", handleEditorDrop);
 
-  const hasDraft = restoreDraft();
-  if (!hasDraft) {
-    void restoreLastFile();
+  const hasSession = restoreTabSession();
+  if (!hasSession) {
+    const hasDraft = restoreDraft();
+    if (!hasDraft) {
+      void restoreLastFile();
+    }
+  }
+  if (workspaceRoot.value) {
+    void loadWorkspaceChildren("");
   }
   void resolvePreviewImages();
   if (isWailsRuntime()) {
@@ -4177,6 +5360,7 @@ onBeforeUnmount(() => {
           <button class="ghost" @click="runCommand('toggleTheme')">{{ isDarkTheme ? t('light') : t('dark') }}</button>
           <button class="ghost" @click="runCommand('settings')">{{ t('settings') }}</button>
           <button class="ghost" @click="runCommand('toggleLanguage')">{{ t('langButton') }}</button>
+          <button class="ghost" @click="runCommand('switchTab')">{{ t('tabSwitcher') }}</button>
           <button class="ghost" @click="runCommand('palette')">{{ t('command') }}</button>
         </div>
         <div class="toolbar-divider" />
@@ -4193,10 +5377,60 @@ onBeforeUnmount(() => {
     </header>
 
     <section v-if="!isZenMode" class="tabbar">
-      <div v-for="tab in docTabs" :key="tab.id" class="tab-item" :class="{ active: tab.id === activeTabId }">
-        <button class="tab-main" @click="activateTab(tab.id)">{{ tab.dirty ? `${tab.name} *` : tab.name }}</button>
+      <div
+        v-for="tab in docTabs"
+        :key="tab.id"
+        class="tab-item"
+        :class="{ active: tab.id === activeTabId, dragging: tabDraggingId === tab.id }"
+        draggable="true"
+        @dragstart="onTabDragStart($event, tab.id)"
+        @dragover="onTabDragOver"
+        @drop="onTabDrop($event, tab.id)"
+        @dragend="onTabDragEnd"
+        @contextmenu="openTabContextMenu($event, tab.id)"
+      >
+        <template v-if="tabRenamingId === tab.id">
+          <input
+            :data-tab-rename-id="tab.id"
+            v-model="tabRenameDraft"
+            class="tab-rename-input"
+            @keydown.enter.prevent="commitRenameTab(tab.id)"
+            @keydown.esc.prevent="cancelRenameTab"
+            @blur="commitRenameTab(tab.id)"
+          />
+        </template>
+        <button v-else class="tab-main" @click="activateTab(tab.id)" @dblclick.stop="startRenameTab(tab.id)">
+          <span v-if="tab.pinned" class="tab-pin">📌</span>
+          {{ tab.dirty ? `${getTabDisplayName(tab)} *` : getTabDisplayName(tab) }}
+        </button>
         <button class="tab-close-btn" @click.stop="requestCloseTab(tab.id)">x</button>
       </div>
+    </section>
+
+    <section v-if="tabContextMenu.visible" class="tab-menu-mask" @click="closeTabContextMenu">
+      <article class="tab-context-menu" :style="{ left: `${tabContextMenu.x}px`, top: `${tabContextMenu.y}px` }" @click.stop>
+        <button @click="requestCloseTab(tabContextMenu.tabId); closeTabContextMenu()">{{ t('tabMenuClose') }}</button>
+        <button
+          @click="
+            activateTab(tabContextMenu.tabId);
+            startRenameTab(tabContextMenu.tabId);
+            closeTabContextMenu();
+          "
+        >
+          {{ t('tabMenuRename') }}
+        </button>
+        <button
+          @click="
+            togglePinTab(tabContextMenu.tabId);
+            closeTabContextMenu();
+          "
+        >
+          {{ docTabs.find((tab) => tab.id === tabContextMenu.tabId)?.pinned ? t('tabMenuUnpin') : t('tabMenuPin') }}
+        </button>
+        <button @click="closeUnpinnedTabs(); closeTabContextMenu()">{{ t('tabMenuCloseUnpinned') }}</button>
+        <button @click="closeOtherTabs(tabContextMenu.tabId); closeTabContextMenu()">{{ t('tabMenuCloseOthers') }}</button>
+        <button @click="closeTabsToRight(tabContextMenu.tabId); closeTabContextMenu()">{{ t('tabMenuCloseRight') }}</button>
+      </article>
     </section>
 
     <section v-if="showReplacePanel && !isZenMode" class="replace-panel">
@@ -4254,6 +5488,180 @@ onBeforeUnmount(() => {
           <p v-if="outlineItems.length === 0" class="sidebar-empty">{{ t('noHeadings') }}</p>
           <p v-else-if="filteredOutlineItems.length === 0" class="sidebar-empty">{{ t('noMatchedHeadings') }}</p>
         </div>
+
+        <div class="sidebar-section-title section-head">
+          <span>{{ t('workspace') }}</span>
+          <span class="section-actions">
+            <button class="mini-action" :title="t('chooseFolder')" @click="pickWorkspaceFolder">{{ t('chooseFolder') }}</button>
+            <button class="mini-action" :disabled="!workspaceRoot" :title="t('clearFolder')" @click="clearWorkspaceFolder">{{ t('clearFolder') }}</button>
+          </span>
+        </div>
+        <div class="sidebar-search-wrap">
+          <input v-model="workspaceQuery" class="sidebar-search" :placeholder="t('filterWorkspace')" />
+        </div>
+        <div class="sidebar-search-wrap workspace-search-wrap">
+          <div class="workspace-search-head">{{ t('workspaceSearch') }}</div>
+          <div class="workspace-search-row">
+            <input
+              ref="workspaceSearchInput"
+              v-model="workspaceSearchQuery"
+              class="sidebar-search"
+              :placeholder="t('workspaceSearchPlaceholder')"
+              @keydown="onWorkspaceSearchInputKeydown"
+            />
+            <button
+              class="mini-action"
+              :disabled="!workspaceRoot || workspaceSearchLoading || !workspaceSearchQuery.trim()"
+              @click="runWorkspaceContentSearch"
+            >
+              {{ t('workspaceSearchRun') }}
+            </button>
+          </div>
+          <div class="workspace-search-row">
+            <input
+              v-model="workspaceReplaceWith"
+              class="sidebar-search"
+              :placeholder="t('workspaceReplaceWith')"
+            />
+            <button
+              class="mini-action"
+              :disabled="!workspaceRoot || workspaceReplacePreviewLoading || !workspaceSearchQuery.trim()"
+              @click="runWorkspaceReplacePreview"
+            >
+              {{ t('workspaceReplacePreview') }}
+            </button>
+          </div>
+          <label class="workspace-search-check">
+            <input v-model="workspaceReplaceMatchCase" type="checkbox" />
+            <span>{{ t('workspaceReplaceMatchCase') }}</span>
+          </label>
+          <div class="workspace-search-row">
+            <button
+              class="mini-action"
+              :disabled="workspaceReplacePreviewItems.length === 0"
+              @click="toggleSelectAllWorkspaceReplacePaths"
+            >
+              {{ allWorkspaceReplacePreviewSelected ? t('workspaceReplaceUnselectAll') : t('workspaceReplaceSelectAll') }}
+            </button>
+            <button
+              class="mini-action danger"
+              :disabled="!workspaceRoot || workspaceReplaceRunning || workspaceReplaceSelectedPaths.length === 0"
+              @click="runWorkspaceReplace"
+            >
+              {{ tf('workspaceReplaceSelected', { count: workspaceReplaceSelectedPaths.length }) }}
+            </button>
+          </div>
+        </div>
+        <div
+          class="sidebar-list workspace-list"
+          @contextmenu="openWorkspaceContextMenu($event)"
+          @dragover="onWorkspaceDragOver"
+          @drop="onWorkspaceDrop($event)"
+        >
+          <button
+            v-for="node in filteredWorkspaceNodes"
+            :key="`ws-${node.relPath}`"
+            class="sidebar-item workspace-row"
+            :class="{ dragging: workspaceDraggingRelPath === node.relPath }"
+            :style="{ paddingLeft: `${8 + node.depth * 14}px` }"
+            draggable="true"
+            @dragstart="onWorkspaceDragStart($event, node)"
+            @dragover="onWorkspaceDragOver"
+            @drop.stop="onWorkspaceDrop($event, node)"
+            @dragend="onWorkspaceDragEnd"
+            @contextmenu.stop="openWorkspaceContextMenu($event, node)"
+            @click="openWorkspaceNode(node)"
+          >
+            <span class="workspace-caret">{{ node.isDir ? (workspaceExpandedMap[node.relPath] ? '▾' : '▸') : '·' }}</span>
+            <span>{{ node.name }}</span>
+          </button>
+          <p v-if="!workspaceRoot" class="sidebar-empty">{{ t('noWorkspace') }}</p>
+          <p v-else-if="workspaceNodes.length === 0" class="sidebar-empty">{{ t('noMatchedFiles') }}</p>
+          <p v-else-if="filteredWorkspaceNodes.length === 0" class="sidebar-empty">{{ t('noWorkspaceMatch') }}</p>
+
+          <div class="workspace-search-results">
+            <p v-if="workspaceSearchLoading" class="sidebar-empty">{{ t('workspaceSearching') }}</p>
+            <template v-else>
+              <button
+                v-for="(hit, index) in workspaceSearchResults"
+                :key="`ws-hit-${hit.path}-${hit.line}-${hit.column}-${index}`"
+                class="sidebar-item workspace-search-hit"
+                :class="{ active: index === workspaceSearchActiveIndex }"
+                @mouseenter="workspaceSearchActiveIndex = index"
+                @click="openWorkspaceSearchHit(hit)"
+              >
+                <span class="workspace-hit-path">{{ hit.path }}</span>
+                <span class="workspace-hit-meta">{{ tf('workspaceSearchLine', { line: hit.line }) }}, Col {{ hit.column }}</span>
+                <span class="workspace-hit-preview" v-html="getWorkspaceSearchPreviewHTML(hit.preview || '...')" />
+              </button>
+              <p
+                v-if="workspaceRoot && workspaceSearchQuery.trim() && workspaceSearchResults.length === 0"
+                class="sidebar-empty"
+              >
+                {{ t('workspaceSearchEmpty') }}
+              </p>
+            </template>
+          </div>
+          <div class="workspace-replace-preview">
+            <p v-if="workspaceReplacePreviewLoading" class="sidebar-empty">{{ t('workspaceSearching') }}</p>
+            <template v-else>
+              <div
+                v-for="item in workspaceReplacePreviewItems"
+                :key="`ws-rep-${item.path}`"
+                class="workspace-replace-item"
+                :class="{ active: workspaceReplaceSelectedPaths.includes(item.path) }"
+              >
+                <input
+                  class="workspace-replace-check"
+                  type="checkbox"
+                  :checked="workspaceReplaceSelectedPaths.includes(item.path)"
+                  @change="toggleWorkspaceReplacePath(item.path)"
+                />
+                <div class="workspace-replace-meta">
+                  <div class="workspace-replace-top">
+                    <span class="workspace-hit-path">{{ item.path }}</span>
+                    <span class="workspace-hit-meta">{{ item.occurrences }} hit(s)</span>
+                    <button class="mini-action" @click="toggleWorkspaceReplaceDiff(item.path)">{{ t('workspaceReplaceDiff') }}</button>
+                  </div>
+                  <span v-if="!workspaceReplaceExpandedMap[item.path]" class="workspace-hit-preview" v-html="getWorkspaceReplaceSampleHTML(item.sample || '...')" />
+                  <div v-else class="workspace-replace-diff">
+                    <div class="workspace-replace-line before">
+                      <span class="workspace-replace-label">{{ t('workspaceReplaceBefore') }}</span>
+                      <span class="workspace-hit-preview" v-html="getWorkspaceReplaceSampleHTML(item.sample || '')" />
+                    </div>
+                    <div class="workspace-replace-line after">
+                      <span class="workspace-replace-label">{{ t('workspaceReplaceAfter') }}</span>
+                      <span class="workspace-hit-preview" v-html="getWorkspaceReplaceSampleAfterHTML(item.sample || '')" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p v-if="workspaceSearchQuery.trim() && workspaceReplacePreviewItems.length === 0" class="sidebar-empty">
+                {{ t('workspaceReplaceNoPreview') }}
+              </p>
+            </template>
+          </div>
+        </div>
+
+        <section v-if="workspaceContextMenu.visible" class="tab-menu-mask" @click="closeWorkspaceContextMenu">
+          <article class="tab-context-menu" :style="{ left: `${workspaceContextMenu.x}px`, top: `${workspaceContextMenu.y}px` }" @click.stop>
+            <button @click="createWorkspaceFileAction(); closeWorkspaceContextMenu()">{{ t('workspaceNewFile') }}</button>
+            <button @click="createWorkspaceFolderAction(); closeWorkspaceContextMenu()">{{ t('workspaceNewFolder') }}</button>
+            <button
+              :disabled="!workspaceContextMenu.relPath"
+              @click="renameWorkspaceEntryAction(); closeWorkspaceContextMenu()"
+            >
+              {{ t('workspaceRename') }}
+            </button>
+            <button
+              class="danger"
+              :disabled="!workspaceContextMenu.relPath"
+              @click="deleteWorkspaceEntryAction(); closeWorkspaceContextMenu()"
+            >
+              {{ t('workspaceDelete') }}
+            </button>
+          </article>
+        </section>
 
         <div class="sidebar-section-title recent-title section-head">
           <span>{{ t('recentFiles') }}</span>
@@ -4364,6 +5772,26 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <p v-if="filteredPaletteCommands.length === 0" class="palette-empty">{{ t('noCommandFound') }}</p>
+      </article>
+    </section>
+
+    <section v-if="showTabSwitcher" class="palette-mask" @click="showTabSwitcher = false">
+      <article class="palette tab-switcher-panel" @click.stop>
+        <h2>{{ t('tabSwitcher') }}</h2>
+        <input v-model="tabSwitcherQuery" class="palette-search" :placeholder="t('searchTabs')" />
+        <div class="palette-list">
+          <button
+            v-for="(tab, idx) in filteredTabSwitcherItems"
+            :key="`switch-${tab.id}`"
+            :class="{ active: idx === tabSwitcherActiveIndex }"
+            @mouseenter="tabSwitcherActiveIndex = idx"
+            @click="executeTabSwitcherAt(idx)"
+          >
+            {{ tab.pinned ? "📌 " : "" }}{{ tab.dirty ? `${getTabDisplayName(tab)} *` : getTabDisplayName(tab) }}
+            <span class="shortcut">{{ tab.path || "unsaved" }}</span>
+          </button>
+        </div>
+        <p v-if="filteredTabSwitcherItems.length === 0" class="palette-empty">{{ t('noMatchedTabs') }}</p>
       </article>
     </section>
 
@@ -4705,6 +6133,10 @@ onBeforeUnmount(() => {
   background: #e9f0fb;
 }
 
+.tab-item.dragging {
+  opacity: 0.55;
+}
+
 .tab-main {
   border: 0;
   background: transparent;
@@ -4715,6 +6147,22 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
+}
+
+.tab-pin {
+  margin-right: 6px;
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.tab-rename-input {
+  border: 0;
+  background: transparent;
+  color: #1f2937;
+  padding: 6px 10px;
+  max-width: 220px;
+  min-width: 80px;
+  outline: none;
 }
 
 .tab-close-btn {
@@ -4740,9 +6188,69 @@ onBeforeUnmount(() => {
   color: #e5e7eb;
 }
 
+.layout.dark .tab-rename-input {
+  color: #e5e7eb;
+}
+
 .layout.dark .tab-close-btn {
   border-left-color: #42536d;
   color: #9fb2cc;
+}
+
+.tab-menu-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 260;
+}
+
+.tab-context-menu {
+  position: fixed;
+  min-width: 140px;
+  border: 1px solid #d6dde8;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 6px;
+  display: grid;
+  gap: 6px;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.18);
+}
+
+.tab-context-menu button {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  padding: 5px 10px;
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tab-context-menu button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.tab-context-menu button.danger {
+  border-color: #ef4444;
+  color: #b91c1c;
+}
+
+.layout.dark .tab-context-menu {
+  border-color: #334155;
+  background: #0f172a;
+  box-shadow: 0 10px 26px rgba(2, 6, 23, 0.5);
+}
+
+.layout.dark .tab-context-menu button {
+  border-color: #42536d;
+  background: #1b2537;
+  color: #e5e7eb;
+}
+
+.layout.dark .tab-context-menu button.danger {
+  border-color: #f87171;
+  color: #fca5a5;
 }
 
 .toolbar {
@@ -4946,7 +6454,7 @@ onBeforeUnmount(() => {
 .sidebar {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto 1fr auto 1fr;
+  grid-template-rows: auto auto minmax(120px, 1fr) auto auto auto minmax(120px, 1fr) auto auto minmax(120px, 1fr);
   border: 1px solid #d9e0ea;
   border-radius: 12px;
   overflow: hidden;
@@ -5109,6 +6617,170 @@ onBeforeUnmount(() => {
   max-height: 180px;
 }
 
+.workspace-list {
+  max-height: none;
+}
+
+.workspace-search-wrap {
+  padding-top: 6px;
+}
+
+.workspace-search-head {
+  font-size: 11px;
+  color: #64748b;
+  margin: 0 0 6px;
+}
+
+.workspace-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.workspace-search-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.workspace-search-results {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  border-top: 1px dashed #d6dde8;
+  padding-top: 8px;
+}
+
+.workspace-replace-preview {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  border-top: 1px dashed #d6dde8;
+  padding-top: 8px;
+}
+
+.workspace-replace-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px;
+  align-items: flex-start;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  padding: 6px;
+  background: #ffffff;
+}
+
+.workspace-replace-item.active {
+  background: #e8f0fb;
+  border-color: #9fb1c9;
+}
+
+.workspace-replace-check {
+  margin-top: 2px;
+}
+
+.workspace-replace-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.workspace-replace-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.workspace-replace-diff {
+  display: grid;
+  gap: 4px;
+}
+
+.workspace-replace-line {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.workspace-replace-line.before .workspace-hit-preview {
+  color: #334155;
+}
+
+.workspace-replace-line.after .workspace-hit-preview {
+  color: #0f766e;
+}
+
+.workspace-replace-label {
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.5;
+}
+
+.workspace-replace-empty {
+  opacity: 0.7;
+}
+
+.workspace-hit-preview :deep(mark.replace-mark) {
+  background: #86efac;
+  color: #14532d;
+}
+
+.workspace-search-hit {
+  display: grid;
+  gap: 2px;
+}
+
+.workspace-search-hit.active {
+  background: #e8f0fb;
+  border-color: #9fb1c9;
+}
+
+.workspace-hit-path {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.workspace-hit-meta {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.workspace-hit-preview {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-hit-preview :deep(mark) {
+  background: #fde68a;
+  color: #1f2937;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+
+.workspace-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workspace-row.dragging {
+  opacity: 0.55;
+}
+
+.workspace-caret {
+  width: 12px;
+  text-align: center;
+  color: #64748b;
+}
+
 .recent-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -5151,6 +6823,61 @@ onBeforeUnmount(() => {
 .layout.dark .sidebar-item.active {
   background: #2a3a54;
   border-color: #6a7f9f;
+}
+
+.layout.dark .workspace-caret {
+  color: #9fb2cc;
+}
+
+.layout.dark .workspace-search-head,
+.layout.dark .workspace-hit-meta,
+.layout.dark .workspace-search-check {
+  color: #94a3b8;
+}
+
+.layout.dark .workspace-search-results {
+  border-top-color: #334155;
+}
+
+.layout.dark .workspace-replace-preview {
+  border-top-color: #334155;
+}
+
+.layout.dark .workspace-replace-item {
+  border-color: #42536d;
+  background: #1b2537;
+}
+
+.layout.dark .workspace-replace-item.active {
+  background: #2a3a54;
+  border-color: #6a7f9f;
+}
+
+.layout.dark .workspace-replace-line.before .workspace-hit-preview {
+  color: #cbd5e1;
+}
+
+.layout.dark .workspace-replace-line.after .workspace-hit-preview {
+  color: #5eead4;
+}
+
+.layout.dark .workspace-replace-label {
+  color: #94a3b8;
+}
+
+.layout.dark .workspace-hit-preview :deep(mark.replace-mark) {
+  background: #22c55e;
+  color: #052e16;
+}
+
+.layout.dark .workspace-search-hit.active {
+  background: #2a3a54;
+  border-color: #6a7f9f;
+}
+
+.layout.dark .workspace-hit-preview :deep(mark) {
+  background: #f59e0b;
+  color: #111827;
 }
 
 .mini-action.danger {
@@ -5575,6 +7302,10 @@ onBeforeUnmount(() => {
   width: min(860px, calc(100vw - 30px));
 }
 
+.tab-switcher-panel {
+  width: min(720px, calc(100vw - 30px));
+}
+
 .settings-panel {
   width: min(920px, calc(100vw - 30px));
 }
@@ -5775,7 +7506,7 @@ onBeforeUnmount(() => {
   }
 
   .sidebar {
-    grid-template-rows: auto minmax(120px, 1fr) auto minmax(100px, 1fr);
+    grid-template-rows: auto auto minmax(120px, 1fr) auto auto auto minmax(120px, 1fr) auto auto minmax(120px, 1fr);
   }
 }
 </style>

@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -79,6 +82,75 @@ func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 type RecentFile struct {
 	Path string `json:"path"`
 	Name string `json:"name"`
+}
+
+type WorkspaceEntry struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	IsDir bool   `json:"isDir"`
+}
+
+type WorkspaceSearchHit struct {
+	Path    string `json:"path"`
+	Line    int    `json:"line"`
+	Column  int    `json:"column"`
+	Preview string `json:"preview"`
+}
+
+type WorkspaceReplaceResult struct {
+	FilesChanged int      `json:"filesChanged"`
+	Occurrences  int      `json:"occurrences"`
+	Paths        []string `json:"paths"`
+}
+
+type WorkspaceReplacePreviewItem struct {
+	Path        string `json:"path"`
+	Occurrences int    `json:"occurrences"`
+	Sample      string `json:"sample"`
+}
+
+type WorkspaceReplacePreviewResult struct {
+	Files       int                           `json:"files"`
+	Occurrences int                           `json:"occurrences"`
+	Items       []WorkspaceReplacePreviewItem `json:"items"`
+}
+
+func sanitizeWorkspaceName(name string) (string, error) {
+	clean := strings.TrimSpace(name)
+	if clean == "" {
+		return "", errors.New("name is required")
+	}
+	if clean == "." || clean == ".." {
+		return "", errors.New("invalid name")
+	}
+	if strings.Contains(clean, "/") || strings.Contains(clean, "\\") {
+		return "", errors.New("name cannot contain path separators")
+	}
+	return clean, nil
+}
+
+func resolveWorkspaceAbsPath(rootPath string, relativePath string) (string, string, error) {
+	root := strings.TrimSpace(rootPath)
+	if root == "" {
+		return "", "", errors.New("rootPath is required")
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", "", err
+	}
+	target := absRoot
+	rel := strings.TrimSpace(relativePath)
+	if rel != "" {
+		target = filepath.Join(absRoot, filepath.FromSlash(rel))
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", "", err
+	}
+	if absTarget != absRoot && !strings.HasPrefix(absTarget, absRoot+string(os.PathSeparator)) {
+		return "", "", errors.New("target escapes root")
+	}
+	return absRoot, absTarget, nil
 }
 
 // OpenFileResult is the payload returned to frontend when opening files.
@@ -213,6 +285,656 @@ func (a *App) OpenMarkdownFile() (*OpenFileResult, error) {
 // OpenMarkdownFileAtPath reads a file from an absolute path for recent-file reopen.
 func (a *App) OpenMarkdownFileAtPath(path string) (*OpenFileResult, error) {
 	return readMarkdownFile(path)
+}
+
+// SelectWorkspaceFolder opens a directory picker and returns selected absolute path.
+func (a *App) SelectWorkspaceFolder() (string, error) {
+	selectedPath, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select Workspace Folder",
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(selectedPath), nil
+}
+
+// ListWorkspaceEntries lists direct children of root/relative for sidebar project tree.
+func (a *App) ListWorkspaceEntries(rootPath string, relativePath string) ([]WorkspaceEntry, error) {
+	absRoot, absTarget, err := resolveWorkspaceAbsPath(rootPath, relativePath)
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(absTarget)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]WorkspaceEntry, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		absPath := filepath.Join(absTarget, name)
+		relPath, err := filepath.Rel(absRoot, absPath)
+		if err != nil {
+			continue
+		}
+		relPath = filepath.ToSlash(relPath)
+		info, infoErr := entry.Info()
+		isDir := entry.IsDir()
+		if infoErr == nil {
+			isDir = info.IsDir()
+		}
+		result = append(result, WorkspaceEntry{
+			Name:  name,
+			Path:  relPath,
+			IsDir: isDir,
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].IsDir != result[j].IsDir {
+			return result[i].IsDir
+		}
+		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
+	})
+
+	return result, nil
+}
+
+// CreateWorkspaceFile creates an empty file under workspace directory.
+func (a *App) CreateWorkspaceFile(rootPath string, parentRelativePath string, name string) (string, error) {
+	baseName, err := sanitizeWorkspaceName(name)
+	if err != nil {
+		return "", err
+	}
+	absRoot, absParent, err := resolveWorkspaceAbsPath(rootPath, parentRelativePath)
+	if err != nil {
+		return "", err
+	}
+	parentInfo, err := os.Stat(absParent)
+	if err != nil {
+		return "", err
+	}
+	if !parentInfo.IsDir() {
+		return "", errors.New("parent is not a directory")
+	}
+	target := filepath.Join(absParent, baseName)
+	if _, err := os.Stat(target); err == nil {
+		return "", errors.New("entry already exists")
+	}
+	file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		return "", err
+	}
+	_ = file.Close()
+	rel, err := filepath.Rel(absRoot, target)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+// CreateWorkspaceFolder creates a directory under workspace directory.
+func (a *App) CreateWorkspaceFolder(rootPath string, parentRelativePath string, name string) (string, error) {
+	baseName, err := sanitizeWorkspaceName(name)
+	if err != nil {
+		return "", err
+	}
+	absRoot, absParent, err := resolveWorkspaceAbsPath(rootPath, parentRelativePath)
+	if err != nil {
+		return "", err
+	}
+	parentInfo, err := os.Stat(absParent)
+	if err != nil {
+		return "", err
+	}
+	if !parentInfo.IsDir() {
+		return "", errors.New("parent is not a directory")
+	}
+	target := filepath.Join(absParent, baseName)
+	if _, err := os.Stat(target); err == nil {
+		return "", errors.New("entry already exists")
+	}
+	if err := os.Mkdir(target, 0755); err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absRoot, target)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+// RenameWorkspaceEntry renames a file/folder under workspace.
+func (a *App) RenameWorkspaceEntry(rootPath string, relativePath string, newName string) (string, error) {
+	baseName, err := sanitizeWorkspaceName(newName)
+	if err != nil {
+		return "", err
+	}
+	absRoot, absTarget, err := resolveWorkspaceAbsPath(rootPath, relativePath)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(relativePath) == "" {
+		return "", errors.New("relativePath is required")
+	}
+	if _, err := os.Stat(absTarget); err != nil {
+		return "", err
+	}
+	parent := filepath.Dir(absTarget)
+	next := filepath.Join(parent, baseName)
+	if absTarget == next {
+		rel, relErr := filepath.Rel(absRoot, absTarget)
+		if relErr != nil {
+			return "", relErr
+		}
+		return filepath.ToSlash(rel), nil
+	}
+	if _, err := os.Stat(next); err == nil {
+		return "", errors.New("entry already exists")
+	}
+	if err := os.Rename(absTarget, next); err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absRoot, next)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+// DeleteWorkspaceEntry deletes a file/folder under workspace.
+func (a *App) DeleteWorkspaceEntry(rootPath string, relativePath string) error {
+	_, absTarget, err := resolveWorkspaceAbsPath(rootPath, relativePath)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(relativePath) == "" {
+		return errors.New("relativePath is required")
+	}
+	return os.RemoveAll(absTarget)
+}
+
+// MoveWorkspaceEntry moves a file/folder to target directory under workspace.
+func (a *App) MoveWorkspaceEntry(rootPath string, fromRelativePath string, targetDirRelativePath string) (string, error) {
+	absRoot, absFrom, err := resolveWorkspaceAbsPath(rootPath, fromRelativePath)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(fromRelativePath) == "" {
+		return "", errors.New("fromRelativePath is required")
+	}
+	_, err = os.Stat(absFrom)
+	if err != nil {
+		return "", err
+	}
+
+	_, absTargetDir, err := resolveWorkspaceAbsPath(rootPath, targetDirRelativePath)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(absTargetDir)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("target is not a directory")
+	}
+
+	base := filepath.Base(absFrom)
+	absTo := filepath.Join(absTargetDir, base)
+
+	if absFrom == absTo {
+		rel, relErr := filepath.Rel(absRoot, absFrom)
+		if relErr != nil {
+			return "", relErr
+		}
+		return filepath.ToSlash(rel), nil
+	}
+
+	fromInfo, err := os.Stat(absFrom)
+	if err != nil {
+		return "", err
+	}
+	if fromInfo.IsDir() {
+		if absTo == absFrom || strings.HasPrefix(absTo, absFrom+string(os.PathSeparator)) {
+			return "", errors.New("cannot move folder into itself")
+		}
+	}
+	if _, err := os.Stat(absTo); err == nil {
+		return "", errors.New("entry already exists at destination")
+	}
+
+	if err := os.Rename(absFrom, absTo); err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absRoot, absTo)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+// SearchWorkspaceContent searches markdown/plain-text files in workspace and returns match positions.
+func (a *App) SearchWorkspaceContent(rootPath string, query string, limit int) ([]WorkspaceSearchHit, error) {
+	absRoot, _, err := resolveWorkspaceAbsPath(rootPath, "")
+	if err != nil {
+		return nil, err
+	}
+	needle := strings.TrimSpace(query)
+	if needle == "" {
+		return []WorkspaceSearchHit{}, nil
+	}
+	if limit <= 0 {
+		limit = 80
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	needleLower := strings.ToLower(needle)
+	results := make([]WorkspaceSearchHit, 0, min(limit, 80))
+
+	err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if len(results) >= limit {
+			return fs.SkipAll
+		}
+		if path == absRoot {
+			return nil
+		}
+
+		name := d.Name()
+		if strings.HasPrefix(name, ".") {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(name))
+		if ext != ".md" && ext != ".markdown" && ext != ".txt" {
+			return nil
+		}
+
+		file, openErr := os.Open(path)
+		if openErr != nil {
+			return nil
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		// Increase line token limit for larger markdown files.
+		scanner.Buffer(make([]byte, 1024), 1024*1024)
+		lineNo := 0
+		for scanner.Scan() {
+			lineNo++
+			text := scanner.Text()
+			lower := strings.ToLower(text)
+			from := 0
+			for {
+				idx := strings.Index(lower[from:], needleLower)
+				if idx < 0 {
+					break
+				}
+				col := from + idx + 1
+				rel, relErr := filepath.Rel(absRoot, path)
+				if relErr == nil {
+					results = append(results, WorkspaceSearchHit{
+						Path:    filepath.ToSlash(rel),
+						Line:    lineNo,
+						Column:  col,
+						Preview: strings.TrimSpace(text),
+					})
+				}
+				if len(results) >= limit {
+					return fs.SkipAll
+				}
+				from += idx + len(needleLower)
+				if from >= len(lower) {
+					break
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.SkipAll) {
+		return nil, err
+	}
+	return results, nil
+}
+
+func replaceAllCaseInsensitive(src string, query string, replacement string) (string, int, error) {
+	re, err := regexp.Compile("(?i)" + regexp.QuoteMeta(query))
+	if err != nil {
+		return src, 0, err
+	}
+	count := 0
+	out := re.ReplaceAllStringFunc(src, func(_ string) string {
+		count++
+		return replacement
+	})
+	return out, count, nil
+}
+
+// PreviewWorkspaceReplace previews match counts per file for workspace replace.
+func (a *App) PreviewWorkspaceReplace(rootPath string, query string, matchCase bool, maxFiles int) (*WorkspaceReplacePreviewResult, error) {
+	absRoot, _, err := resolveWorkspaceAbsPath(rootPath, "")
+	if err != nil {
+		return nil, err
+	}
+	needle := strings.TrimSpace(query)
+	if needle == "" {
+		return &WorkspaceReplacePreviewResult{Files: 0, Occurrences: 0, Items: []WorkspaceReplacePreviewItem{}}, nil
+	}
+	if maxFiles <= 0 {
+		maxFiles = 200
+	}
+	if maxFiles > 2000 {
+		maxFiles = 2000
+	}
+
+	result := &WorkspaceReplacePreviewResult{
+		Files:       0,
+		Occurrences: 0,
+		Items:       make([]WorkspaceReplacePreviewItem, 0, min(maxFiles, 200)),
+	}
+
+	var caseInsensitiveRE *regexp.Regexp
+	if !matchCase {
+		caseInsensitiveRE, err = regexp.Compile("(?i)" + regexp.QuoteMeta(needle))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if result.Files >= maxFiles {
+			return fs.SkipAll
+		}
+		if path == absRoot {
+			return nil
+		}
+		name := d.Name()
+		if strings.HasPrefix(name, ".") {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(name))
+		if ext != ".md" && ext != ".markdown" && ext != ".txt" {
+			return nil
+		}
+
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		src := string(data)
+		if src == "" {
+			return nil
+		}
+
+		count := 0
+		if matchCase {
+			count = strings.Count(src, needle)
+		} else {
+			count = len(caseInsensitiveRE.FindAllStringIndex(src, -1))
+		}
+		if count == 0 {
+			return nil
+		}
+
+		rel, relErr := filepath.Rel(absRoot, path)
+		if relErr != nil {
+			return nil
+		}
+		sample := ""
+		lines := strings.Split(src, "\n")
+		for _, line := range lines {
+			if matchCase {
+				if strings.Contains(line, needle) {
+					sample = strings.TrimSpace(line)
+					break
+				}
+			} else {
+				if caseInsensitiveRE.FindStringIndex(line) != nil {
+					sample = strings.TrimSpace(line)
+					break
+				}
+			}
+		}
+		result.Items = append(result.Items, WorkspaceReplacePreviewItem{
+			Path:        filepath.ToSlash(rel),
+			Occurrences: count,
+			Sample:      sample,
+		})
+		result.Files++
+		result.Occurrences += count
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.SkipAll) {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ReplaceWorkspaceContent replaces text in markdown/plain-text files in workspace.
+func (a *App) ReplaceWorkspaceContent(rootPath string, query string, replacement string, matchCase bool, maxFiles int) (*WorkspaceReplaceResult, error) {
+	absRoot, _, err := resolveWorkspaceAbsPath(rootPath, "")
+	if err != nil {
+		return nil, err
+	}
+	needle := strings.TrimSpace(query)
+	if needle == "" {
+		return &WorkspaceReplaceResult{FilesChanged: 0, Occurrences: 0, Paths: []string{}}, nil
+	}
+	if maxFiles <= 0 {
+		maxFiles = 200
+	}
+	if maxFiles > 2000 {
+		maxFiles = 2000
+	}
+
+	result := &WorkspaceReplaceResult{
+		FilesChanged: 0,
+		Occurrences:  0,
+		Paths:        make([]string, 0, min(maxFiles, 200)),
+	}
+	needleLower := strings.ToLower(needle)
+
+	err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if result.FilesChanged >= maxFiles {
+			return fs.SkipAll
+		}
+		if path == absRoot {
+			return nil
+		}
+
+		name := d.Name()
+		if strings.HasPrefix(name, ".") {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(name))
+		if ext != ".md" && ext != ".markdown" && ext != ".txt" {
+			return nil
+		}
+
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		src := string(data)
+		if src == "" {
+			return nil
+		}
+
+		var (
+			next  string
+			count int
+		)
+		if matchCase {
+			count = strings.Count(src, needle)
+			if count == 0 {
+				return nil
+			}
+			next = strings.ReplaceAll(src, needle, replacement)
+		} else {
+			// Fast skip for no-hit files.
+			if !strings.Contains(strings.ToLower(src), needleLower) {
+				return nil
+			}
+			var repErr error
+			next, count, repErr = replaceAllCaseInsensitive(src, needle, replacement)
+			if repErr != nil || count == 0 {
+				return nil
+			}
+		}
+		if next == src {
+			return nil
+		}
+		if writeErr := os.WriteFile(path, []byte(next), 0644); writeErr != nil {
+			return nil
+		}
+
+		rel, relErr := filepath.Rel(absRoot, path)
+		if relErr == nil {
+			result.Paths = append(result.Paths, filepath.ToSlash(rel))
+		}
+		result.FilesChanged++
+		result.Occurrences += count
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.SkipAll) {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ReplaceWorkspaceContentByPaths replaces text only in selected relative paths.
+func (a *App) ReplaceWorkspaceContentByPaths(rootPath string, query string, replacement string, matchCase bool, paths []string, maxFiles int) (*WorkspaceReplaceResult, error) {
+	absRoot, _, err := resolveWorkspaceAbsPath(rootPath, "")
+	if err != nil {
+		return nil, err
+	}
+	needle := strings.TrimSpace(query)
+	if needle == "" {
+		return &WorkspaceReplaceResult{FilesChanged: 0, Occurrences: 0, Paths: []string{}}, nil
+	}
+	if len(paths) == 0 {
+		return a.ReplaceWorkspaceContent(rootPath, query, replacement, matchCase, maxFiles)
+	}
+	if maxFiles <= 0 {
+		maxFiles = len(paths)
+	}
+	if maxFiles > len(paths) {
+		maxFiles = len(paths)
+	}
+
+	result := &WorkspaceReplaceResult{
+		FilesChanged: 0,
+		Occurrences:  0,
+		Paths:        make([]string, 0, min(maxFiles, len(paths))),
+	}
+	needleLower := strings.ToLower(needle)
+	seen := make(map[string]struct{}, len(paths))
+
+	for _, raw := range paths {
+		if result.FilesChanged >= maxFiles {
+			break
+		}
+		rel := strings.TrimSpace(raw)
+		if rel == "" {
+			continue
+		}
+		_, absPath, resolveErr := resolveWorkspaceAbsPath(absRoot, rel)
+		if resolveErr != nil {
+			continue
+		}
+		cleanRel, relErr := filepath.Rel(absRoot, absPath)
+		if relErr != nil {
+			continue
+		}
+		cleanRel = filepath.ToSlash(cleanRel)
+		if _, ok := seen[cleanRel]; ok {
+			continue
+		}
+		seen[cleanRel] = struct{}{}
+
+		info, statErr := os.Stat(absPath)
+		if statErr != nil || info.IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(absPath))
+		if ext != ".md" && ext != ".markdown" && ext != ".txt" {
+			continue
+		}
+
+		data, readErr := os.ReadFile(absPath)
+		if readErr != nil {
+			continue
+		}
+		src := string(data)
+		if src == "" {
+			continue
+		}
+
+		var (
+			next  string
+			count int
+		)
+		if matchCase {
+			count = strings.Count(src, needle)
+			if count == 0 {
+				continue
+			}
+			next = strings.ReplaceAll(src, needle, replacement)
+		} else {
+			if !strings.Contains(strings.ToLower(src), needleLower) {
+				continue
+			}
+			var repErr error
+			next, count, repErr = replaceAllCaseInsensitive(src, needle, replacement)
+			if repErr != nil || count == 0 {
+				continue
+			}
+		}
+		if next == src {
+			continue
+		}
+		if writeErr := os.WriteFile(absPath, []byte(next), 0644); writeErr != nil {
+			continue
+		}
+		result.Paths = append(result.Paths, cleanRel)
+		result.FilesChanged++
+		result.Occurrences += count
+	}
+	return result, nil
 }
 
 // AddRecentFile stores or updates a file in recent-file history.

@@ -6,6 +6,12 @@ export function AddRecentFile(arg1:string,arg2:string):Promise<void>;
 
 export function ClearRecentFiles():Promise<void>;
 
+export function CreateWorkspaceFile(arg1:string,arg2:string,arg3:string):Promise<string>;
+
+export function CreateWorkspaceFolder(arg1:string,arg2:string,arg3:string):Promise<string>;
+
+export function DeleteWorkspaceEntry(arg1:string,arg2:string):Promise<void>;
+
 export function ExportMarkdownAsPDF(arg1:main.ExportPDFRequest):Promise<main.ExportPDFResult>;
 
 export function ListRecentFiles(arg1:number):Promise<Array<main.RecentFile>>;
@@ -20,7 +26,23 @@ export function Ping():Promise<string>;
 
 export function RemoveRecentFile(arg1:string):Promise<void>;
 
+export function MoveWorkspaceEntry(arg1:string,arg2:string,arg3:string):Promise<string>;
+
+export function SearchWorkspaceContent(arg1:string,arg2:string,arg3:number):Promise<Array<main.WorkspaceSearchHit>>;
+
+export function ReplaceWorkspaceContent(arg1:string,arg2:string,arg3:string,arg4:boolean,arg5:number):Promise<main.WorkspaceReplaceResult>;
+
+export function PreviewWorkspaceReplace(arg1:string,arg2:string,arg3:boolean,arg4:number):Promise<main.WorkspaceReplacePreviewResult>;
+
+export function ReplaceWorkspaceContentByPaths(arg1:string,arg2:string,arg3:string,arg4:boolean,arg5:Array<string>,arg6:number):Promise<main.WorkspaceReplaceResult>;
+
+export function RenameWorkspaceEntry(arg1:string,arg2:string,arg3:string):Promise<string>;
+
+export function SelectWorkspaceFolder():Promise<string>;
+
 export function ResolveImageDataURL(arg1:string,arg2:string):Promise<string>;
+
+export function ListWorkspaceEntries(arg1:string,arg2:string):Promise<Array<main.WorkspaceEntry>>;
 
 export function SaveImageAsset(arg1:main.SaveImageAssetRequest):Promise<main.SaveImageAssetResult>;
 
